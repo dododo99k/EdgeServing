@@ -1,0 +1,5 @@
+# Binary artifacts
+*.png
+*.pkl
+*.pickle
+*.pkl.*
