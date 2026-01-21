@@ -1509,7 +1509,24 @@ def scheduler(
                         0.0,
                     )
                 VIRTUAL_SLO_QUEUE[model_name] = Z_new
-
+                # 在 batch 执行完成后（约 L1511 之后），添加：
+                if scheduler_type in ["ours", "ours_normalized"]:
+                    for m in models.keys():
+                        if m == model_name:
+                            # 被调度的模型：使用实际 SLO penalty
+                            avg_pen = avg_pen_actual
+                        else:
+                            # 未被调度的模型：penalty = 0（没有服务，没有 violation）
+                            avg_pen = 0.0
+                        
+                        Z_old = VIRTUAL_SLO_QUEUE.get(m, 0.0)
+                        if scheduler_type == "ours":
+                            Z_new = max(Z_old + (avg_pen - SLO_PENALTY_TARGET), 0.0)
+                        else:  # ours_normalized
+                            Z_new = max(Z_old + (avg_pen - SLO_PENALTY_TARGET_N), 0.0)
+                        VIRTUAL_SLO_QUEUE[m] = Z_new
+                        
+                
                 print(
                     f"[Scheduler-{model_name}][{scheduler_type}] Z_old={Z_old:.4f}, "
                     f"avg_slo_pen_actual={avg_pen_actual:.4f}, "
