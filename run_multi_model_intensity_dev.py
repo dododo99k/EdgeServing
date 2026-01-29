@@ -346,8 +346,8 @@ def main():
     logs_dir = args.logs_dir
 
     schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
-    schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
-    schedulers = ["all_final_round_robin","ours_normalized"]
+    # schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
+    # schedulers = ["all_final_round_robin","ours_normalized"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 
