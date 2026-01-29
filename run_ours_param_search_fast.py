@@ -100,7 +100,25 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
         payload = pickle.load(f)
 
     total_time_by_model_exit = payload["total_time_by_model_exit"]
-    dropped_wait_times_by_model = payload["dropped_wait_times_by_model"]
+    slo_ms = payload.get("slo_ms", 50.0)
+
+    # Try to get SLO violations from new format, fallback to old dropped format
+    slo_violations_by_model = payload.get("slo_violations_by_model", None)
+    if slo_violations_by_model:
+        # New format: use pre-computed SLO violations
+        num_violations = sum(v["violations"] for v in slo_violations_by_model.values())
+        num_completed = sum(v["total"] for v in slo_violations_by_model.values())
+        violation_ratio = num_violations / num_completed if num_completed > 0 else 0.0
+    else:
+        # Fallback: compute from dropped_wait_times_by_model (old format)
+        dropped_wait_times_by_model = payload.get("dropped_wait_times_by_model", {})
+        num_violations = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
+        # Count completed tasks from total_time_by_model_exit
+        num_completed = 0
+        for exit_dict in total_time_by_model_exit.values():
+            for times in exit_dict.values():
+                num_completed += len(times)
+        violation_ratio = num_violations / (num_completed + num_violations) if (num_completed + num_violations) > 0 else 0.0
 
     exit_points = payload.get("exit_points")
     if not exit_points:
@@ -121,7 +139,7 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
             all_times.extend(times)
 
     all_times = np.array(all_times, dtype=np.float64)
-    
+
     if all_times.size == 0:
         p95_ms = float("nan")
         mean_ms = float("nan")
@@ -129,10 +147,9 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
         p95_ms = float(np.percentile(all_times * 1000.0, 95))
         mean_ms = float(np.mean(all_times * 1000.0))
 
-    num_completed = int(all_times.size)
-    num_dropped = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
-    total = num_completed + num_dropped
-    drop_ratio = float(num_dropped) / total if total > 0 else 0.0
+    # Note: num_completed and violation_ratio already computed above
+    slo_violation_ratio = violation_ratio
+    throughput = num_completed
 
     # Average exit depth (lower = earlier exit = faster but less accurate)
     total_all = 0
@@ -148,61 +165,64 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
     return {
         "p95_ms": p95_ms,
         "mean_ms": mean_ms,
-        "drop_ratio": drop_ratio,
+        "slo_violation_ratio": slo_violation_ratio,
         "num_completed": num_completed,
-        "num_dropped": num_dropped,
+        "num_violations": int(num_violations),
         "avg_exit_depth": avg_exit_depth,
-        "throughput": num_completed,
+        "throughput": throughput,
+        # Keep old names for backward compatibility
+        "drop_ratio": slo_violation_ratio,
+        "num_dropped": int(num_violations),
     }
 
 
-def compute_objective(metrics: Dict[str, Any], slo_ms: float, 
-                      w_latency: float = 1.0, w_drop: float = 30.0, 
+def compute_objective(metrics: Dict[str, Any], slo_ms: float,
+                      w_violation: float = 50.0,
                       w_depth: float = 0.3,
-                      drop_threshold: float = 0.05) -> float:
+                      violation_threshold: float = 0.05) -> float:
     """
     Compute optimization objective (higher is better).
-    
-    Balances:
-    - SLO compliance: penalize if p95 > slo_ms
-    - Drop ratio: heavily penalize drops with nonlinear penalty
+
+    Optimizes based on:
+    - SLO violation ratio: heavily penalize tasks exceeding SLO with nonlinear penalty
     - Exit depth: prefer using deeper exits (better accuracy)
     - Throughput: more completed tasks is better
-    
+
     Args:
-        drop_threshold: drop ratio above this triggers exponential penalty
+        w_violation: weight for violation ratio penalty (higher = stricter SLO compliance)
+        w_depth: weight for exit depth reward (higher = prefer deeper/more accurate exits)
+        violation_threshold: violation ratio above this triggers exponential penalty
+
+    Note: p95 latency is tracked but not used in optimization objective.
+          Only the actual violation ratio (% of tasks exceeding SLO) is optimized.
     """
-    p95 = metrics["p95_ms"]
-    drop_ratio = metrics["drop_ratio"]
+    # Support both new and old metric names
+    violation_ratio = metrics.get("slo_violation_ratio", metrics.get("drop_ratio", 0.0))
     avg_depth = metrics["avg_exit_depth"]
     throughput = metrics["num_completed"]
-    
-    if np.isnan(p95) or np.isnan(avg_depth):
+
+    if np.isnan(avg_depth):
         return -1e6
-    
-    # SLO violation penalty
-    slo_violation = max(0, (p95 - slo_ms) / slo_ms)
-    
-    # Drop ratio penalty with nonlinear scaling
-    drop_penalty = w_drop * drop_ratio
-    
-    # Additional exponential penalty when drop_ratio > threshold
-    if drop_ratio > drop_threshold:
-        excess_drop = drop_ratio - drop_threshold
-        drop_penalty += 100.0 * (np.exp(excess_drop * 10) - 1)
-    
-    # Hard constraint: if drop_ratio > 20%, severely penalize
-    if drop_ratio > 0.20:
-        drop_penalty += 1000.0
-    
-    # Objective: maximize depth while minimizing latency and drops
+
+    # Violation ratio penalty with nonlinear scaling
+    violation_penalty = w_violation * violation_ratio
+
+    # Additional exponential penalty when violation_ratio > threshold
+    if violation_ratio > violation_threshold:
+        excess_violation = violation_ratio - violation_threshold
+        violation_penalty += 100.0 * (np.exp(excess_violation * 10) - 1)
+
+    # Hard constraint: if violation_ratio > 20%, severely penalize
+    if violation_ratio > 0.20:
+        violation_penalty += 1000.0
+
+    # Objective: maximize depth while minimizing violations
     score = (
-        - w_latency * slo_violation  # Penalize SLO violations
-        - drop_penalty               # Heavily penalize drops (nonlinear)
-        + w_depth * (avg_depth / 4)  # Reward deeper exits (normalized to 0-1)
-        + 0.001 * throughput / 1000  # Small bonus for throughput
+        - violation_penalty              # Heavily penalize SLO violations (ratio)
+        + w_depth * (avg_depth / 4)      # Reward deeper exits (normalized to 0-1)
+        + 0.001 * throughput / 1000      # Small bonus for throughput
     )
-    
+
     return score
 
 
@@ -234,10 +254,10 @@ def bayesian_search(args) -> Dict[str, Any]:
             
             # Log intermediate results
             trial.set_user_attr("p95_ms", metrics["p95_ms"])
-            trial.set_user_attr("drop_ratio", metrics["drop_ratio"])
+            trial.set_user_attr("slo_violation_ratio", metrics["slo_violation_ratio"])
             trial.set_user_attr("avg_exit_depth", metrics["avg_exit_depth"])
-            
-            print(f"  → p95={metrics['p95_ms']:.2f}ms, drop={metrics['drop_ratio']:.3f}, "
+
+            print(f"  → p95={metrics['p95_ms']:.2f}ms, slo_viol={metrics['slo_violation_ratio']:.3f}, "
                   f"depth={metrics['avg_exit_depth']:.2f}, score={score:.4f}")
             
             return score
@@ -268,7 +288,7 @@ def bayesian_search(args) -> Dict[str, Any]:
     print(f"  SLO_PENALTY_TARGET_N = {study.best_params['slo_penalty_target_n']:.4f}")
     print(f"\nBest score: {study.best_value:.4f}")
     print(f"  p95_ms: {study.best_trial.user_attrs.get('p95_ms', 'N/A')}")
-    print(f"  drop_ratio: {study.best_trial.user_attrs.get('drop_ratio', 'N/A')}")
+    print(f"  slo_violation_ratio: {study.best_trial.user_attrs.get('slo_violation_ratio', 'N/A')}")
     print(f"  avg_exit_depth: {study.best_trial.user_attrs.get('avg_exit_depth', 'N/A')}")
     
     return {
@@ -323,7 +343,7 @@ def coarse_to_fine_search(args) -> Dict[str, Any]:
                         "score": score, **metrics
                     })
                     
-                    print(f"  → p95={metrics['p95_ms']:.2f}ms, drop={metrics['drop_ratio']:.3f}, "
+                    print(f"  → p95={metrics['p95_ms']:.2f}ms, slo_viol={metrics['slo_violation_ratio']:.3f}, "
                           f"depth={metrics['avg_exit_depth']:.2f}, score={score:.4f}")
                     
                     if score > best_score:
@@ -381,7 +401,7 @@ def coarse_to_fine_search(args) -> Dict[str, Any]:
                         "score": score, "stage": "fine", **metrics
                     })
                     
-                    print(f"  → p95={metrics['p95_ms']:.2f}ms, drop={metrics['drop_ratio']:.3f}, "
+                    print(f"  → p95={metrics['p95_ms']:.2f}ms, slo_viol={metrics['slo_violation_ratio']:.3f}, "
                           f"depth={metrics['avg_exit_depth']:.2f}, score={score:.4f}")
                     
                     if score > best_score:
@@ -416,15 +436,15 @@ def main():
     parser.add_argument("--method", type=str, default="bayesian",
                         choices=["bayesian", "coarse-to-fine"],
                         help="Search method: 'bayesian' (requires optuna) or 'coarse-to-fine'")
-    parser.add_argument("--lam", type=float, default=200,
+    parser.add_argument("--lam", type=float, default=50,
                         help="Base lambda value for Poisson arrival rate")
     parser.add_argument("--n-trials", type=int, default=50,
                         help="Number of trials for Bayesian optimization")
-    parser.add_argument("--run-seconds", type=int, default=20,
+    parser.add_argument("--run-seconds", type=int, default=60,
                         help="Duration of each run in seconds")
     parser.add_argument("--run-seconds-coarse", type=int, default=10,
                         help="Shorter duration for coarse search stage")
-    parser.add_argument("--slo-ms", type=float, default=15.0,
+    parser.add_argument("--slo-ms", type=float, default=50.0,
                         help="Total latency SLO in milliseconds")
     parser.add_argument("--slo-quantile", type=str, default="p95_ms",
                         choices=["mean_ms", "p50_ms", "p90_ms", "p95_ms", "p99_ms"])
@@ -467,3 +487,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # use command delete ./logs/
+    subprocess.run(["rm", "-rf", "./logs/"])

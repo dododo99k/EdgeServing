@@ -354,7 +354,6 @@ def algorithm_early_exit(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Profile-based early-exit scheduler:
@@ -406,24 +405,6 @@ def algorithm_early_exit(
 
     now = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][early_exit] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     # Max waiting time among kept tasks
@@ -452,7 +433,6 @@ def algorithm_all_early(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     All-early baseline: always use the earliest (shallowest) exit in exit_points
@@ -493,24 +473,6 @@ def algorithm_all_early(
 
     now = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][all_early] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now - t.arrival_time for t in batch_tasks]
@@ -540,7 +502,6 @@ def algorithm_all_final(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Baseline: always use exit="final" (no early-exit).
@@ -581,24 +542,6 @@ def algorithm_all_final(
 
     now = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][all_final] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now - t.arrival_time for t in batch_tasks]
@@ -627,7 +570,6 @@ def algorithm_all_final_round_robin(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Baseline: always use exit="final" (no early-exit).
@@ -685,24 +627,6 @@ def algorithm_all_final_round_robin(
 
     now = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][all_final] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now - t.arrival_time for t in batch_tasks]
@@ -734,7 +658,6 @@ def algorithm_symphony(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Symphony-style deferred batching:
@@ -838,22 +761,12 @@ def algorithm_symphony(
     profile_results = profile_results_by_model[model_name]
 
     batch_tasks = []
-    # Pull tasks until batch is full; drop over-SLO tasks and keep filling.
+    # Pull tasks until batch is full
     while len(batch_tasks) < max_batch:
         try:
             t = q.get_nowait()
         except _queue.Empty:
             break
-
-        wait_ms = (time.perf_counter() - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][symphony] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-            continue
 
         batch_tasks.append(t)
 
@@ -888,7 +801,6 @@ def algorithm_ours(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Our Lyapunov-style scheduler:
@@ -1010,7 +922,6 @@ def algorithm_ours(
             quantile_key=quantile_key,
             profile_results_by_model=profile_results_by_model,
             warmup_tasks=warmup_tasks,
-            dropped_wait_times_by_model=dropped_wait_times_by_model,
         )
 
     # -------------------------
@@ -1037,24 +948,6 @@ def algorithm_ours(
 
     now2 = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now2 - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][ours] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now2 - t.arrival_time for t in batch_tasks]
@@ -1085,7 +978,6 @@ def algorithm_ours_normalized(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
-    dropped_wait_times_by_model: dict,
 ):
     """
     Our Lyapunov-style scheduler, with score normalized by inference time.
@@ -1205,7 +1097,6 @@ def algorithm_ours_normalized(
             quantile_key=quantile_key,
             profile_results_by_model=profile_results_by_model,
             warmup_tasks=warmup_tasks,
-            dropped_wait_times_by_model=dropped_wait_times_by_model,
         )
 
     # -------------------------
@@ -1232,24 +1123,6 @@ def algorithm_ours_normalized(
 
     now2 = time.perf_counter()
 
-    # Drop tasks whose waiting time already exceeds SLO
-    kept_tasks = []
-    for t in batch_tasks:
-        wait_ms = (now2 - t.arrival_time) * 1000.0
-        if wait_ms > latency_threshold_ms:
-            if t.task_id >= warmup_tasks:
-                dropped_wait_times_by_model[model_name].append(wait_ms / 1000.0)
-            print(
-                f"[Scheduler-{model_name}][ours_normalized] DROPPED Task {t.task_id} "
-                f"due to wait={wait_ms:.2f} ms > SLO={latency_threshold_ms:.2f} ms"
-            )
-        else:
-            kept_tasks.append(t)
-
-    if not kept_tasks:
-        return None
-
-    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now2 - t.arrival_time for t in batch_tasks]
@@ -1293,7 +1166,6 @@ def scheduler(
     total_time_by_model_exit: dict,
     wait_time_by_model_exit: dict,
     infer_time_by_model_exit: dict,
-    dropped_wait_times_by_model: dict,
     batch_diag: list,
 ):
     """
@@ -1332,7 +1204,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "all_early":
             result = algorithm_all_early(
@@ -1344,7 +1215,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "all_final":
             result = algorithm_all_final(
@@ -1356,7 +1226,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "all_final_round_robin":
             result = algorithm_all_final_round_robin(
@@ -1368,7 +1237,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "symphony":
             result = algorithm_symphony(
@@ -1380,7 +1248,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "ours":
             result = algorithm_ours(
@@ -1392,7 +1259,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "ours_normalized":
             result = algorithm_ours_normalized(
@@ -1404,7 +1270,6 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
-                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         else:
             raise ValueError(f"Unknown scheduler_type: {scheduler_type}")
@@ -1792,20 +1657,20 @@ def main():
     parser.add_argument(
         "--scheduler",
         type=str,
-        default="ours",
-        choices=["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours", "ours_normalized"],
-        help="Scheduling policy: 'early_exit', 'all_final' (no early-exit), 'all_final_round_robin' (round-robin), 'all_early' (earliest exit, longest-queue-first), 'symphony' (deferred batching), 'ours' (Lyapunov-based), or 'ours_normalized' (time-normalized score).",
+        default="ours_normalized",
+        choices=["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"],
+        help="Scheduling policy: 'early_exit', 'all_final' (no early-exit), 'all_final_round_robin' (round-robin), 'all_early' (earliest exit, longest-queue-first), 'symphony' (deferred batching) or 'ours_normalized' (time-normalized score).",
     )
     parser.add_argument(
-        "--lambda-50", dest="lam50", type=float, default=60.0,
+        "--lambda-50", dest="lam50", type=float, default=15.0,
         help="Total Poisson arrival rate for all ResNet50 instances (req/s).",
     )
     parser.add_argument(
-        "--lambda-101", dest="lam101", type=float, default=40.0,
+        "--lambda-101", dest="lam101", type=float, default=10.0,
         help="Total Poisson arrival rate for all ResNet101 instances (req/s).",
     )
     parser.add_argument(
-        "--lambda-152", dest="lam152", type=float, default=20.0,
+        "--lambda-152", dest="lam152", type=float, default=5.0,
         help="Total Poisson arrival rate for all ResNet152 instances (req/s).",
     )
     parser.add_argument(
@@ -1976,7 +1841,6 @@ def main():
     total_time_by_model_exit = {m: {e: [] for e in exit_points} for m in models.keys()}
     wait_time_by_model_exit = {m: {e: [] for e in exit_points} for m in models.keys()}
     infer_time_by_model_exit = {m: {e: [] for e in exit_points} for m in models.keys()}
-    dropped_wait_times_by_model = {m: [] for m in models.keys()}
     batch_diag = []
 
     # Control
@@ -2009,7 +1873,6 @@ def main():
             total_time_by_model_exit,
             wait_time_by_model_exit,
             infer_time_by_model_exit,
-            dropped_wait_times_by_model,
             batch_diag,
         ),
         daemon=True,
@@ -2052,24 +1915,39 @@ def main():
                 f"p95={np.percentile(arr, 95)*1000:.2f} ms"
             )
 
-    def summarize_drops(name, dropped_waits_sec):
-        if not dropped_waits_sec:
-            print(f"{name}: no dropped tasks.")
-            return
-        arr = np.array(dropped_waits_sec) * 1000.0
+    def summarize_slo_violations(name, total_times, slo_ms):
+        if not total_times:
+            print(f"{name}: no completed tasks for SLO violation check.")
+            return 0, 0.0
+        arr = np.array(total_times)
+        arr_ms = arr * 1000.0
+        violations = np.sum(arr_ms > slo_ms)
+        total = len(arr_ms)
+        violation_ratio = violations / total if total > 0 else 0.0
         print(
-            f"{name} dropped tasks: count={len(arr)}, "
-            f"min_wait={arr.min():.2f} ms, "
-            f"mean_wait={arr.mean():.2f} ms, "
-            f"p50_wait={np.percentile(arr, 50):.2f} ms, "
-            f"p95_wait={np.percentile(arr, 95):.2f} ms"
+            f"{name} SLO violations: {violations}/{total} "
+            f"({violation_ratio*100:.2f}% exceeded {slo_ms:.0f} ms SLO)"
         )
+        return violations, violation_ratio
 
     print(f"\n=== Multi-model stats [{scheduler_type}] ===")
+    total_violations = 0
+    total_tasks = 0
     for m in models.keys():
         summarize_overall(m, total_time_by_model[m])
         summarize_by_exit(m, total_time_by_model_exit[m])
-        summarize_drops(m, dropped_wait_times_by_model[m])
+        violations, _ = summarize_slo_violations(m, total_time_by_model[m], latency_threshold_ms)
+        total_violations += violations
+        total_tasks += len(total_time_by_model[m])
+
+    # Overall SLO violation summary across all models
+    if total_tasks > 0:
+        overall_violation_ratio = total_violations / total_tasks
+        print(f"\n=== Overall SLO violations [{scheduler_type}] ===")
+        print(
+            f"Total: {total_violations}/{total_tasks} tasks "
+            f"({overall_violation_ratio*100:.2f}% exceeded {latency_threshold_ms:.0f} ms SLO)"
+        )
     # Average early-exit depth (weighted by completed, non-warmup tasks)
     avg_stats, _depth_map = compute_avg_early_exit_stats(total_time_by_model_exit, exit_points)
     max_depth = len(exit_points)
@@ -2097,6 +1975,27 @@ def main():
         figures_dir = os.path.join(figures_dir, output_tag)
         logs_dir = os.path.join(logs_dir, output_tag)
 
+    # Compute SLO violations for diagnostics
+    slo_violations_by_model = {}
+    for m in models.keys():
+        if total_time_by_model[m]:
+            arr = np.array(total_time_by_model[m])
+            arr_ms = arr * 1000.0
+            violations = int(np.sum(arr_ms > latency_threshold_ms))
+            total = len(arr_ms)
+            violation_ratio = violations / total if total > 0 else 0.0
+            slo_violations_by_model[m] = {
+                "violations": violations,
+                "total": total,
+                "violation_ratio": violation_ratio,
+            }
+        else:
+            slo_violations_by_model[m] = {
+                "violations": 0,
+                "total": 0,
+                "violation_ratio": 0.0,
+            }
+
     # Save diagnostics
     ensure_dirs(figures_dir=figures_dir, logs_dir=logs_dir)
     diag_payload = {
@@ -2108,7 +2007,7 @@ def main():
         "total_time_by_model_exit": total_time_by_model_exit,
         "wait_time_by_model_exit": wait_time_by_model_exit,
         "infer_time_by_model_exit": infer_time_by_model_exit,
-        "dropped_wait_times_by_model": dropped_wait_times_by_model,
+        "slo_violations_by_model": slo_violations_by_model,
         "batch_diag": batch_diag,
     }
     diag_path = os.path.join(logs_dir, f"multi_model_diag_{scheduler_type}.pkl")
