@@ -152,16 +152,16 @@ def plot_boxplots_for_model(
             legend_labels.append(exit_id)
 
     # Axes labels and ticks
-    ax.set_title(f"{model_name} latency by batch size and early-exit")
-    ax.set_xlabel("Batch size")
-    ax.set_ylabel("Latency (ms)")
+    ax.set_title(f"{model_name} latency by batch size and early-exit", fontsize=18, fontweight='bold')
+    ax.set_xlabel("Batch size", fontsize=16)
+    ax.set_ylabel("Latency (ms)", fontsize=16)
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
 
     ax.set_xticks(batch_sizes)
     ax.set_xticklabels([str(bs) for bs in batch_sizes])
 
     if legend_handles:
-        ax.legend(legend_handles, legend_labels, title="Exit", loc="upper left")
+        ax.legend(legend_handles, legend_labels, title="Exit", loc="upper left", fontsize=14)
 
     fig.tight_layout()
 

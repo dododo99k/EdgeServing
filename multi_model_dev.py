@@ -84,11 +84,11 @@ SLO_PENALTY_TARGET = float(os.getenv("SLO_PENALTY_TARGET", "0.1"))
 # Allow overrides via environment variables for grid search.
 # first version 1 0.3 1.5
 # second  0.1 1.2 1.3]
-W_SLO_N = float(os.getenv("W_SLO_N", "1"))
-W_ACC_N = float(os.getenv("W_ACC_N", "0.3"))
+W_SLO_N = float(os.getenv("W_SLO_N", "0.0229"))
+W_ACC_N = float(os.getenv("W_ACC_N", "0.4238"))
 
 # Target average SLO penalty per batch used in virtual queue update
-SLO_PENALTY_TARGET_N = float(os.getenv("SLO_PENALTY_TARGET_N", "1.5"))
+SLO_PENALTY_TARGET_N = float(os.getenv("SLO_PENALTY_TARGET_N", "0.7445"))
 # ========================
 # Global task id generator
 # ========================
@@ -277,18 +277,25 @@ def choose_exit_id_from_profile(
     return fallback_exit, infer_ms, total_ms
 
 
-def build_accuracy_penalty(exit_points):
+# Hardcoded penalties based on ResNet block structure
+# Penalty = (skipped_blocks / total_blocks) * 4.0
+ACCURACY_PENALTIES = {
+    "ResNet50":  {"layer1": 3.25, "layer2": 2.25, "layer3": 0.75, "final": 0.0},
+    "ResNet101": {"layer1": 3.64, "layer2": 3.15, "layer3": 0.36, "final": 0.0},
+    "ResNet152": {"layer1": 3.76, "layer2": 3.12, "layer3": 0.24, "final": 0.0},
+}
+
+def build_accuracy_penalty(model_names, exit_points):
     """
-    Simple per-exit accuracy penalty (per request).
-    Larger for shallower exits (more accuracy loss).
+    Build accuracy penalty dict for all models: acc_penalty[model_name][exit_id]
     """
-    base = {
-        "layer1": 3.0,
-        "layer2": 2.0,
-        "layer3": 1.0,
-        "final": 0.0,
-    }
-    return {e: base.get(e, 0.0) for e in exit_points}
+    fallback = {"layer1": 3.0, "layer2": 2.0, "layer3": 1.0, "final": 0.0}
+    result = {}
+    for m in model_names:
+        base_model = m.split("_")[0]  # "ResNet50_0" -> "ResNet50"
+        base = ACCURACY_PENALTIES.get(base_model, fallback)
+        result[m] = {e: base.get(e, 0.0) for e in exit_points}
+    return result
 
 
 def compute_avg_slo_penalty(
@@ -926,7 +933,7 @@ def algorithm_ours(
     if not non_empty_models:
         return None
 
-    acc_penalty = build_accuracy_penalty(exit_points)
+    acc_penalty = build_accuracy_penalty(model_names, exit_points)
     now = time.perf_counter()
 
     best_score = -float("inf")
@@ -975,7 +982,7 @@ def algorithm_ours(
             )
 
             Zm = VIRTUAL_SLO_QUEUE[m]
-            acc_pen = acc_penalty[e]
+            acc_pen = acc_penalty[m][e]
 
             score = (
                 Qm * max_B
@@ -1117,7 +1124,7 @@ def algorithm_ours_normalized(
     if not non_empty_models:
         return None
 
-    acc_penalty = build_accuracy_penalty(exit_points)
+    acc_penalty = build_accuracy_penalty(model_names, exit_points)
     now = time.perf_counter()
 
     best_score = -float("inf")
@@ -1168,7 +1175,7 @@ def algorithm_ours_normalized(
                 )
 
                 Zm = VIRTUAL_SLO_QUEUE[m]
-                acc_pen = acc_penalty[e]
+                acc_pen = acc_penalty[m][e]
 
                 unnormalized_score = (
                     Qm * B
@@ -1542,7 +1549,9 @@ def compute_avg_early_exit_stats(total_time_by_model_exit: dict, exit_points):
                includes "ALL_MODELS".
         depth_map: dict exit_id -> int depth
     """
-    depth_map = {e: i + 1 for i, e in enumerate(exit_points)}
+    # Use global absolute depth map for fair comparison across different exit configurations
+    GLOBAL_DEPTH_MAP = {"layer1": 1, "layer2": 2, "layer3": 3, "final": 4}
+    depth_map = {e: GLOBAL_DEPTH_MAP.get(e, len(GLOBAL_DEPTH_MAP) + 1) for e in exit_points}
     stats = {}
 
     for model_name, by_exit in total_time_by_model_exit.items():
@@ -1789,15 +1798,27 @@ def main():
     )
     parser.add_argument(
         "--lambda-50", dest="lam50", type=float, default=60.0,
-        help="Poisson arrival rate for ResNet50 (req/s).",
+        help="Total Poisson arrival rate for all ResNet50 instances (req/s).",
     )
     parser.add_argument(
         "--lambda-101", dest="lam101", type=float, default=40.0,
-        help="Poisson arrival rate for ResNet101 (req/s).",
+        help="Total Poisson arrival rate for all ResNet101 instances (req/s).",
     )
     parser.add_argument(
         "--lambda-152", dest="lam152", type=float, default=20.0,
-        help="Poisson arrival rate for ResNet152 (req/s).",
+        help="Total Poisson arrival rate for all ResNet152 instances (req/s).",
+    )
+    parser.add_argument(
+        "--num-r50", type=int, default=1,
+        help="Number of ResNet50 model instances.",
+    )
+    parser.add_argument(
+        "--num-r101", type=int, default=1,
+        help="Number of ResNet101 model instances.",
+    )
+    parser.add_argument(
+        "--num-r152", type=int, default=1,
+        help="Number of ResNet152 model instances.",
     )
     parser.add_argument(
         "--run-seconds", type=int, default=30,
@@ -1837,8 +1858,14 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=66666,
+        default=42, # 66666
         help="Seed for NumPy RNG (Poisson arrivals).",
+    )
+    parser.add_argument(
+        "--exit-points",
+        type=str,
+        default="layer1,layer2,layer3,final",
+        help="Comma-separated list of active exit points (e.g., 'layer1,final' or 'layer2,final').",
     )
     args = parser.parse_args()
 
@@ -1846,6 +1873,9 @@ def main():
     lam50 = args.lam50
     lam101 = args.lam101
     lam152 = args.lam152
+    num_r50 = args.num_r50
+    num_r101 = args.num_r101
+    num_r152 = args.num_r152
     run_seconds = args.run_seconds
     profile_dir = args.profile_dir
     latency_threshold_ms = args.slo_ms
@@ -1854,50 +1884,92 @@ def main():
     output_tag = args.output_tag
     
     np.random.seed(args.seed)
-
+    
+    # Parse exit points from command line
+    exit_points_list = [x.strip() for x in args.exit_points.split(",") if x.strip()]
+    exit_points = tuple(exit_points_list)
+    
+    if not exit_points:
+        raise ValueError("At least one exit point must be specified.")
+    
+    print(f"Active exit points: {exit_points}")
+    print(f"Model configuration: {num_r50}×R50, {num_r101}×R101, {num_r152}×R152")
+    
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Scheduler: {scheduler_type}, w_slo={W_SLO}, w_acc={W_ACC}, slo_target={SLO_PENALTY_TARGET}")
     print(f"SLO (total latency): {latency_threshold_ms} ms on {quantile_key}")
     print(f"Warmup tasks (per model): {warmup_tasks}")
 
-    exit_points = ("layer1", "layer2", "layer3", "final")
-
-    # Build early-exit ResNets
+    # Build early-exit ResNets dynamically based on counts
     r50, r101, r152 = build_early_exit_resnets(device, exit_points=exit_points)
-    models = {
-        "ResNet50": r50,
-        "ResNet101": r101,
-        "ResNet152": r152,
-    }
+    
+    models = {}
+    queues = {}
+    gen_threads = []
+    
+    # Create ResNet50 instances
+    for i in range(num_r50):
+        model_name = f"ResNet50_{i}" if num_r50 > 1 else "ResNet50"
+        models[model_name] = r50  # Share the same model weights
+        queues[model_name] = queue.Queue()
+        # Divide lambda equally among instances
+        lam_per_instance = lam50 / num_r50 if num_r50 > 0 else 0
+        if lam_per_instance > 0:
+            gen_threads.append(
+                threading.Thread(
+                    target=poisson_request_generator,
+                    args=(model_name, lam_per_instance, queues[model_name], None),  # stop_event set later
+                    daemon=True,
+                )
+            )
+    
+    # Create ResNet101 instances
+    for i in range(num_r101):
+        model_name = f"ResNet101_{i}" if num_r101 > 1 else "ResNet101"
+        models[model_name] = r101
+        queues[model_name] = queue.Queue()
+        lam_per_instance = lam101 / num_r101 if num_r101 > 0 else 0
+        if lam_per_instance > 0:
+            gen_threads.append(
+                threading.Thread(
+                    target=poisson_request_generator,
+                    args=(model_name, lam_per_instance, queues[model_name], None),
+                    daemon=True,
+                )
+            )
+    
+    # Create ResNet152 instances
+    for i in range(num_r152):
+        model_name = f"ResNet152_{i}" if num_r152 > 1 else "ResNet152"
+        models[model_name] = r152
+        queues[model_name] = queue.Queue()
+        lam_per_instance = lam152 / num_r152 if num_r152 > 0 else 0
+        if lam_per_instance > 0:
+            gen_threads.append(
+                threading.Thread(
+                    target=poisson_request_generator,
+                    args=(model_name, lam_per_instance, queues[model_name], None),
+                    daemon=True,
+                )
+            )
 
-    # Load profiles
+    # Load profiles (shared across instances of same architecture)
     profile_payload_50 = load_profile("ResNet50", profile_dir)
     profile_payload_101 = load_profile("ResNet101", profile_dir)
     profile_payload_152 = load_profile("ResNet152", profile_dir)
 
-    profile_results_by_model = {
-        "ResNet50": profile_payload_50["results"],
-        "ResNet101": profile_payload_101["results"],
-        "ResNet152": profile_payload_152["results"],
-    }
-
-    # Queues
-    q_r50 = queue.Queue()
-    q_r101 = queue.Queue()
-    q_r152 = queue.Queue()
-    queues = {
-        "ResNet50": q_r50,
-        "ResNet101": q_r101,
-        "ResNet152": q_r152,
-    }
+    profile_results_by_model = {}
+    for model_name in models.keys():
+        if "ResNet50" in model_name:
+            profile_results_by_model[model_name] = profile_payload_50["results"]
+        elif "ResNet101" in model_name:
+            profile_results_by_model[model_name] = profile_payload_101["results"]
+        elif "ResNet152" in model_name:
+            profile_results_by_model[model_name] = profile_payload_152["results"]
 
     # Per-model max batch sizes
-    max_batch_size_by_model = {
-        "ResNet50": 10,
-        "ResNet101": 10,
-        "ResNet152": 10,
-    }
+    max_batch_size_by_model = {m: 10 for m in models.keys()}
 
     # Stats containers
     total_time_by_model = {m: [] for m in models.keys()}
@@ -1909,25 +1981,12 @@ def main():
 
     # Control
     stop_event = threading.Event()
-
-    # Generators
-    gen_threads = [
-        threading.Thread(
-            target=poisson_request_generator,
-            args=("ResNet50", lam50, q_r50, stop_event),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=poisson_request_generator,
-            args=("ResNet101", lam101, q_r101, stop_event),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=poisson_request_generator,
-            args=("ResNet152", lam152, q_r152, stop_event),
-            daemon=True,
-        ),
-    ]
+    
+    # Update generator threads with stop_event
+    for thread in gen_threads:
+        # Recreate thread with stop_event
+        old_args = thread._args
+        thread._args = (old_args[0], old_args[1], old_args[2], stop_event)
     for t in gen_threads:
         t.start()
 
