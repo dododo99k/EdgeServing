@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import pickle
+import shutil
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -54,6 +55,7 @@ def run_one_experiment(
     warmup_tasks: int,
     profile_dir: str,
     logs_dir: str,
+    exit_config: list,
 ):
     """
     Run the multi-model serving script once for given (scheduler, λ),
@@ -63,15 +65,13 @@ def run_one_experiment(
         --lambda-50 λ, --lambda-101 λ, --lambda-152 λ
     """
     lam_label = f"{lam:g}"
-    diag_dir = os.path.join(logs_dir, f"lam152_{lam_label}")
-    os.makedirs(diag_dir, exist_ok=True)
-
-    base_diag_name = f"multi_model_diag_{scheduler}.pkl"
-    base_diag_path = os.path.join(diag_dir, base_diag_name)
-
-    # Remove any pre-existing diag file for safety
-    if os.path.exists(base_diag_path):
-        os.remove(base_diag_path)
+    
+    # multi_model_dev.py outputs to logs/ and figures/
+    default_logs_dir = "logs"
+    default_figures_dir = "figures"
+    
+    # Convert exit_config list to comma-separated string
+    exit_str = ",".join(exit_config)
 
     cmd = [
         "python",
@@ -94,12 +94,70 @@ def run_one_experiment(
         str(warmup_tasks),
         "--profile-dir",
         profile_dir,
+        "--exit-points",
+        exit_str,
     ]
 
     print(f"\n=== Running {scheduler} @ λ={lam} ===")
     print("Command:", " ".join(cmd))
 
     subprocess.run(cmd, check=True)
+
+    # Organize logs and figures into parent directories if logs_dir differs from default
+    if logs_dir != default_logs_dir:
+        # Derive figures_dir from logs_dir (replace "logs" with "figures")
+        if "logs" in logs_dir:
+            figures_dir = logs_dir.replace("logs", "figures")
+        else:
+            figures_dir = "figures_" + logs_dir
+        
+        # Move logs/ to target logs_dir
+        if os.path.exists(default_logs_dir):
+            if os.path.exists(logs_dir):
+                # Merge directories
+                for item in os.listdir(default_logs_dir):
+                    src = os.path.join(default_logs_dir, item)
+                    dst = os.path.join(logs_dir, item)
+                    if os.path.isdir(src):
+                        if os.path.exists(dst):
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            shutil.rmtree(src)
+                        else:
+                            shutil.move(src, dst)
+                    else:
+                        shutil.move(src, dst)
+                shutil.rmtree(default_logs_dir)
+            else:
+                os.makedirs(os.path.dirname(logs_dir) if os.path.dirname(logs_dir) else ".", exist_ok=True)
+                shutil.move(default_logs_dir, logs_dir)
+        
+        # Move figures/ to target figures_dir
+        if os.path.exists(default_figures_dir):
+            if os.path.exists(figures_dir):
+                # Merge directories
+                for item in os.listdir(default_figures_dir):
+                    src = os.path.join(default_figures_dir, item)
+                    dst = os.path.join(figures_dir, item)
+                    if os.path.isdir(src):
+                        if os.path.exists(dst):
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            shutil.rmtree(src)
+                        else:
+                            shutil.move(src, dst)
+                    else:
+                        shutil.move(src, dst)
+                shutil.rmtree(default_figures_dir)
+            else:
+                os.makedirs(os.path.dirname(figures_dir) if os.path.dirname(figures_dir) else ".", exist_ok=True)
+                shutil.move(default_figures_dir, figures_dir)
+    else:
+        # logs_dir is default, no moving needed
+        pass
+
+    # Find the diagnostic file
+    diag_dir = os.path.join(logs_dir, f"lam152_{lam_label}")
+    base_diag_name = f"multi_model_diag_{scheduler}.pkl"
+    base_diag_path = os.path.join(diag_dir, base_diag_name)
 
     if not os.path.exists(base_diag_path):
         raise FileNotFoundError(
@@ -152,8 +210,10 @@ def compute_metrics_from_diag(diag_path: str):
         preferred = ["layer1", "layer2", "layer3", "final"]
         exit_points = [e for e in preferred if e in observed] + sorted([e for e in observed if e not in preferred])
 
-    depth_map = {e: i + 1 for i, e in enumerate(exit_points)}
-    max_depth = len(exit_points)
+    # Use global absolute depth map for fair comparison across different exit configurations
+    GLOBAL_DEPTH_MAP = {"layer1": 1, "layer2": 2, "layer3": 3, "final": 4}
+    depth_map = {e: GLOBAL_DEPTH_MAP.get(e, len(GLOBAL_DEPTH_MAP) + 1) for e in exit_points}
+    max_depth = max(depth_map.values()) if depth_map else 0
 
     # Flatten total_times across all models and exits (completed tasks)
     all_times = []
@@ -165,8 +225,10 @@ def compute_metrics_from_diag(diag_path: str):
 
     if all_times.size == 0:
         p95_ms = float("nan")
+        p99_ms = float("nan")
     else:
         p95_ms = float(np.percentile(all_times * 1000.0, 95))
+        p99_ms = float(np.percentile(all_times * 1000.0, 99))
 
     num_completed = int(all_times.size)
     num_dropped = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
@@ -202,6 +264,7 @@ def compute_metrics_from_diag(diag_path: str):
 
     return {
         "p95_ms": float(p95_ms),
+        "p99_ms": float(p99_ms),
         "drop_ratio": float(drop_ratio),
         "num_completed": int(num_completed),
         "num_dropped": int(num_dropped),
@@ -220,8 +283,14 @@ def main():
         "--lambdas",
         type=str,
         # default="10,20,30,40,50,60,70,80",
-        default="20,40,60,80,100,120,140,160,180,200",
+        default="40,80,120,160,200",
         help="Comma-separated list of Poisson arrival rates per model (req/s).",
+    )
+    parser.add_argument(
+        "--exit-config",
+        type=str,
+        default="layer1,layer2,layer3,final",
+        help="Comma-separated list of exit points to use, e.g., 'layer1,final' or 'layer2,final'.",
     )
     parser.add_argument(
         "--run-seconds",
@@ -232,7 +301,7 @@ def main():
     parser.add_argument(
         "--slo-ms",
         type=float,
-        default=20.0,
+        default=15.0,
         help="Total latency SLO in milliseconds (same as serving script).",
     )
     parser.add_argument(
@@ -257,12 +326,18 @@ def main():
     parser.add_argument(
         "--logs-dir",
         type=str,
-        default="logs",
+        default="logs_baseline",
         help="Directory where diag and experiment results are stored.",
     )
     args = parser.parse_args()
 
     lambda_list = [float(x) for x in args.lambdas.split(",") if x.strip()]
+    
+    # Parse exit configuration
+    exit_config = [x.strip() for x in args.exit_config.split(",") if x.strip()]
+    if not exit_config:
+        raise ValueError("Exit config cannot be empty")
+    
     run_seconds = args.run_seconds
     slo_ms = args.slo_ms
     slo_quantile = args.slo_quantile
@@ -270,52 +345,80 @@ def main():
     profile_dir = args.profile_dir
     logs_dir = args.logs_dir
 
-    schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours", "ours_normalized"]
-    schedulers = ["ours_normalized"]
+    schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
+    schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
+    schedulers = ["all_final_round_robin","ours_normalized"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 
+    print(f"\n{'='*60}")
+    print(f"Multi-Model Intensity Experiment")
+    print(f"{'='*60}")
+    print(f"Exit configuration: {exit_config}")
+    print(f"Lambda values: {lambda_list}")
+    print(f"Schedulers: {schedulers}")
+    print(f"{'='*60}\n")
+
     for scheduler in schedulers:
         for lam in lambda_list:
-            diag_path = run_one_experiment(
-                scheduler=scheduler,
-                lam=lam,
-                run_seconds=run_seconds,
-                slo_ms=slo_ms,
-                slo_quantile=slo_quantile,
-                warmup_tasks=warmup_tasks,
-                profile_dir=profile_dir,
-                logs_dir=logs_dir,
-            )
+            try:
+                diag_path = run_one_experiment(
+                    scheduler=scheduler,
+                    lam=lam,
+                    run_seconds=run_seconds,
+                    slo_ms=slo_ms,
+                    slo_quantile=slo_quantile,
+                    warmup_tasks=warmup_tasks,
+                    profile_dir=profile_dir,
+                    logs_dir=logs_dir,
+                    exit_config=exit_config,
+                )
 
-            metrics = compute_metrics_from_diag(diag_path)
-            results[scheduler][lam] = metrics
+                metrics = compute_metrics_from_diag(diag_path)
+                results[scheduler][lam] = metrics
 
-            print(
-                f"[RESULT] scheduler={scheduler}, λ={lam}: "
-                f"p95={metrics['p95_ms']:.2f} ms, "
-                f"drop_ratio={metrics['drop_ratio']:.3f}, "
-                f"completed={metrics['num_completed']}, "
-                f"dropped={metrics['num_dropped']}"
-            )
+                print(
+                    f"[RESULT] scheduler={scheduler}, λ={lam}: "
+                    f"p95={metrics['p95_ms']:.2f} ms, "
+                    f"drop_ratio={metrics['drop_ratio']:.3f}, "
+                    f"completed={metrics['num_completed']}, "
+                    f"dropped={metrics['num_dropped']}"
+                )
+            except Exception as e:
+                print(f"[ERROR] Failed for scheduler={scheduler}, λ={lam}: {e}")
+                continue
 
     # Save experiment data
-    # os.makedirs(logs_dir, exist_ok=True)
-    # exp_path = os.path.join(logs_dir, "multi_model_scheduler_experiment.pkl")
-    # with open(exp_path, "wb") as f:
-    #     pickle.dump(
-    #         {
-    #             "lambda_list": lambda_list,
-    #             "results": results,
-    #             "slo_ms": slo_ms,
-    #             "slo_quantile": slo_quantile,
-    #             "warmup_tasks": warmup_tasks,
-    #         },
-    #         f,
-    #     )
-    # print(f"\nExperiment data saved to: {exp_path}")
+    os.makedirs(logs_dir, exist_ok=True)
+    exp_path = os.path.join(logs_dir, "multi_model_scheduler_experiment.pkl")
+    with open(exp_path, "wb") as f:
+        pickle.dump(
+            {
+                "lambda_list": lambda_list,
+                "exit_config": exit_config,
+                "results": results,
+                "slo_ms": slo_ms,
+                "slo_quantile": slo_quantile,
+                "warmup_tasks": warmup_tasks,
+            },
+            f,
+        )
+    print(f"\nExperiment data saved to: {exp_path}")
 
-    # Plot comparison
+    # Print summary table
+    print(f"\n{'='*60}")
+    print("SUMMARY TABLE")
+    print(f"{'='*60}")
+    for scheduler in schedulers:
+        print(f"\nScheduler: {scheduler}")
+        print(f"{'-'*60}")
+        print(f"{'Lambda':<10} {'P95(ms)':<10} {'Drop%':<10} {'AvgExit':<10} {'Completed':<12} {'Dropped':<10}")
+        print(f"{'-'*60}")
+        for lam in sorted(results[scheduler].keys()):
+            m = results[scheduler][lam]
+            print(f"{lam:<10.0f} {m['p95_ms']:<10.2f} "
+                  f"{m['drop_ratio']*100:<10.2f} {m['avg_exit_all']:<10.2f} "
+                  f"{m['num_completed']:<12} {m['num_dropped']:<10}")
     
 
 

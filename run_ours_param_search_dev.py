@@ -133,8 +133,10 @@ def compute_metrics_from_diag(diag_path: str):
             [e for e in observed if e not in preferred]
         )
 
-    depth_map = {e: i + 1 for i, e in enumerate(exit_points)}
-    max_depth = len(exit_points)
+    # Use global absolute depth map for fair comparison across different exit configurations
+    GLOBAL_DEPTH_MAP = {"layer1": 1, "layer2": 2, "layer3": 3, "final": 4}
+    depth_map = {e: GLOBAL_DEPTH_MAP.get(e, len(GLOBAL_DEPTH_MAP) + 1) for e in exit_points}
+    max_depth = max(depth_map.values()) if depth_map else 0
 
     all_times = []
     for _, exit_dict in total_time_by_model_exit.items():
@@ -208,7 +210,7 @@ def main():
     parser.add_argument(
         "--slo-ms",
         type=float,
-        default=20.0,
+        default=15.0,
         help="Total latency SLO in milliseconds.",
     )
     parser.add_argument(
@@ -233,7 +235,7 @@ def main():
     parser.add_argument(
         "--logs-dir",
         type=str,
-        default="logs",
+        default="logs_baseline",
         help="Directory where diag and experiment results are stored.",
     )
     args = parser.parse_args()
