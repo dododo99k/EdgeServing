@@ -355,7 +355,7 @@ def main():
 
     schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
     # schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
-    # schedulers = ["ours_normalized"]
+    schedulers = ["ours_normalized"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 

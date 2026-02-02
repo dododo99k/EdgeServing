@@ -71,7 +71,7 @@ from early_exit_resnets import build_early_exit_resnets
 
 import os  # add this at the top of the file if not present
 
-DEBUG = True
+DEBUG = False
 
 # Virtual SLO queue per model: model_name -> float
 VIRTUAL_SLO_QUEUE = {}
@@ -1152,14 +1152,15 @@ def algorithm_ours_normalized(
 
     scores = {}
     # # print Q and Z snapshots for debugging
-    print(f"\n[Lyapunov State]")
-    print("Model          | Q (queue size) | Z (virtual SLO queue)")
-    print("-" * 60)
-    for m in sorted(models.keys()):
-        Q_m = queues[m].qsize()
-        Z_m = VIRTUAL_SLO_QUEUE.get(m, 0.0)
-        print(f"{m:<14} | {Q_m:>14d} | {Z_m:>22.4f}")
-    print("-" * 60)
+    if DEBUG:
+        print(f"\n[Lyapunov State]")
+        print("Model          | Q (queue size) | Z (virtual SLO queue)")
+        print("-" * 60)
+        for m in sorted(models.keys()):
+            Q_m = queues[m].qsize()
+            Z_m = VIRTUAL_SLO_QUEUE.get(m, 0.0)
+            print(f"{m:<14} | {Q_m:>14d} | {Z_m:>22.4f}")
+        print("-" * 60)
     # -------------------------
     # Search over (m, B, e)
     # -------------------------
@@ -1193,7 +1194,7 @@ def algorithm_ours_normalized(
                     quantile_key=quantile_key,
                 )
                 if infer_ms is None or infer_ms <= 1e-6: continue # Avoid division by zero/small number
-                if True and infer_ms + max_wait > latency_threshold_ms: # Skip actions that cannot meet SLO even for max wait
+                if False and infer_ms + max_wait > latency_threshold_ms: # Skip actions that cannot meet SLO even for max wait
                     if e == exit_points[0]:
                         pass
                     else:
@@ -1218,7 +1219,8 @@ def algorithm_ours_normalized(
                 # Linear normalization (default - works with properly tuned W_ACC_N)
                 # All terms normalized by inference time
                 # part1 = Qm * B / temp_time
-                part1 = sum(waits_ms[:B]) / temp_time
+                # part1 = sum(waits_ms[:B]) / temp_time
+                part1 = Qm / 10 * sum(waits_ms[:B]) / temp_time
                 # part1 = Qm * B / infer_ms
                 # part2 = - W_SLO_N * Zm  * avg_slo_pen / temp_time
                 part2 = - W_SLO_N * Zm * slo_violation_number + Zm * B * SLO_PENALTY_TARGET_N
@@ -1598,7 +1600,7 @@ def scheduler(
 
                 print(
                     f"[Scheduler-{model_name}][{scheduler_type}] Z_old={Z_old:.4f}, "
-                    f"avg_slo_pen_actual={avg_pen_actual:.4f}, "
+                    f"avg_slo_pen_actual={avg_pen_actual:.4f}, violations={slo_violations}, "
                     f"Z_new={Z_new:.4f} (max={Z_MAX})"
                 )
 
