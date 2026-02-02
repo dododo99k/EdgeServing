@@ -103,7 +103,21 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
     
     # Sort quantiles for consistent plotting
     sorted_quantiles = sorted(plot_data.keys())
-    
+
+    # Collect all unique lambda values from data
+    all_lambdas = set()
+    for quantile in sorted_quantiles:
+        all_lambdas.update(plot_data[quantile]["lambdas"])
+    lambda_ticks = sorted(all_lambdas)
+
+    # Calculate x-axis limits with padding
+    if lambda_ticks:
+        lambda_min, lambda_max = min(lambda_ticks), max(lambda_ticks)
+        padding = (lambda_max - lambda_min) * 0.05 if lambda_max > lambda_min else 1
+        xlim_min, xlim_max = lambda_min - padding, lambda_max + padding
+    else:
+        xlim_min, xlim_max = 0, 100
+
     # Plot 1: P95 Latency
     plt.figure(figsize=(12, 6))
     for quantile in sorted_quantiles:
@@ -115,8 +129,8 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
     plt.ylabel("P95 Total Latency (ms)", fontsize=16)
     plt.title("Impact of Quantile Setting on P95 Latency", fontsize=18, fontweight='bold')
-    plt.xticks([40, 80, 120, 160, 200])
-    plt.xlim(30, 210)
+    plt.xticks(lambda_ticks)
+    plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -135,8 +149,8 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
     plt.ylabel("Drop Ratio", fontsize=16)
     plt.title("Impact of Quantile Setting on Drop Ratio", fontsize=18, fontweight='bold')
-    plt.xticks([40, 80, 120, 160, 200])
-    plt.xlim(30, 210)
+    plt.xticks(lambda_ticks)
+    plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -155,8 +169,8 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
     plt.ylabel("Average Exit Depth", fontsize=16)
     plt.title("Impact of Quantile Setting on Average Exit Depth", fontsize=18, fontweight='bold')
-    plt.xticks([40, 80, 120, 160, 200])
-    plt.xlim(30, 210)
+    plt.xticks(lambda_ticks)
+    plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()

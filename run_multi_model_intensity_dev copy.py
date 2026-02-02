@@ -38,7 +38,6 @@ import re
 import subprocess
 import pickle
 import shutil
-import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -175,7 +174,6 @@ def run_one_experiment(
         os.remove(diag_with_lam)
     os.rename(base_diag_path, diag_with_lam)
 
-    time.sleep(3)  # Ensure file system settles
     return diag_with_lam
 
 
@@ -289,8 +287,8 @@ def main():
     parser.add_argument(
         "--lambdas",
         type=str,
-        default="10,20,30,40,80,120,160,200,210,220,230,240",
-        # default="5,10,15,20,30,40,80,120,160,200,240,280,320,360",
+        # default="10,20,30,40,50,60,70,80",
+        default="40,80,120,160,200",
         # default="5,10,15,20,25,30",
         help="Comma-separated list of Poisson arrival rates per model (req/s).",
     )
@@ -303,7 +301,7 @@ def main():
     parser.add_argument(
         "--run-seconds",
         type=int,
-        default=20,
+        default=30,
         help="Duration of each run in seconds.",
     )
     parser.add_argument(
@@ -354,8 +352,8 @@ def main():
     logs_dir = args.logs_dir
 
     schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
-    # schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
-    # schedulers = ["ours_normalized"]
+    # schedulers = ["early_exit", "all_final", "all_final_round_robin", "symphony"]
+    schedulers = ["ours_normalized"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 
@@ -432,6 +430,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
-    # After running experiments, generate plots
-    subprocess.run(["python", "plot_multi_model_intensity_dev.py"], check=True)

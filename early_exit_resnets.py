@@ -23,6 +23,7 @@ For each model we save one pickle:
 from typing import Iterable, Tuple, List, Dict
 
 import time
+import os
 import pickle
 import numpy as np
 
@@ -273,8 +274,12 @@ def benchmark_latency(
 
 
 def main():
+    
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    os.makedirs("./saves", exist_ok=True)
+
 
     exit_points = ("stem", "layer1", "layer2", "layer3", "final")
     models: Dict[str, EarlyExitResNet] = {}

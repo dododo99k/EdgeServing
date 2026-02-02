@@ -21,18 +21,16 @@ from run_ours_normalized_exit_ablation import compute_metrics_from_diag
 
 
 def _set_x_ticks_40(ax, lambda_list):
-    """Set x-axis ticks at intervals of 40."""
+    """Set x-axis ticks using actual lambda values from lambda_list."""
     if not lambda_list:
         return
+    # Use actual lambda values as ticks
+    ax.set_xticks(lambda_list)
+    # Set xlim based on actual data range
     data_min = min(lambda_list)
     data_max = max(lambda_list)
-    tick_min = int(np.floor(data_min / 40.0) * 40)
-    tick_max = int(np.ceil(data_max / 40.0) * 40)
-    if tick_max < tick_min:
-        tick_max = tick_min
-    ticks = np.arange(tick_min, tick_max + 1, 40)
-    ax.set_xticks(ticks)
-    ax.set_xlim(data_min - 10, data_max + 10)
+    padding = (data_max - data_min) * 0.05 if data_max > data_min else 1
+    ax.set_xlim(data_min - padding, data_max + padding)
 
 
 def load_exit_ablation_results(logs_dir="logs_exit_point_ablation"):

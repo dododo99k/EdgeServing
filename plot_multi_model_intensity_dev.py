@@ -7,19 +7,16 @@ import matplotlib.pyplot as plt
 from run_multi_model_intensity_dev import compute_metrics_from_diag
 
 def _set_x_ticks_40(ax, lambda_list):
+    """Set x-axis ticks using actual lambda values from lambda_list."""
     if not lambda_list:
         return
+    # Use actual lambda values as ticks
+    ax.set_xticks(lambda_list)
+    # Set xlim based on actual data range
     data_min = min(lambda_list)
     data_max = max(lambda_list)
-    # Calculate tick positions that are multiples of 40
-    tick_min = int(np.floor(data_min / 40.0) * 40)
-    tick_max = int(np.ceil(data_max / 40.0) * 40)
-    if tick_max < tick_min:
-        tick_max = tick_min
-    ticks = np.arange(tick_min, tick_max + 1, 40)
-    ax.set_xticks(ticks)
-    # Set xlim based on actual data range
-    ax.set_xlim(data_min - 10, data_max + 10)
+    padding = (data_max - data_min) * 0.05 if data_max > data_min else 1
+    ax.set_xlim(data_min - padding, data_max + padding)
 
 def _legend_label(name: str) -> str:
     if name == "ours_normalized":
@@ -39,9 +36,9 @@ def plot_results(
     results structure:
         results[scheduler][lam] = {
             "p95_ms": ...,
-            "drop_ratio": ...,
+            "violate_ratio": ...,
             "num_completed": ...,
-            "num_dropped": ...,
+            "num_violateped": ...,
         }
     """
     os.makedirs(out_dir, exist_ok=True)
@@ -56,6 +53,8 @@ def plot_results(
     ax1.grid(True, linestyle="--", alpha=0.5)
 
     for scheduler in schedulers:
+        if scheduler == 'symphony' or scheduler == 'all_final_round_robin' or scheduler == 'all_final':
+            continue
         p95_vals = []
         valid_lams = []
         for lam in lambda_list:
@@ -89,33 +88,33 @@ def plot_results(
     print(f"p95 latency figure saved to: {out_path1}")
     plt.close(fig1)
 
-    # Plot drop ratio
+    # Plot violate ratio
     fig2, ax2 = plt.subplots(figsize=(10, 5))
-    ax2.set_title("Impact of Scheduling Policy on Drop Ratio", fontsize=14, fontweight='bold')
+    ax2.set_title("Impact of Scheduling Policy on violate Ratio", fontsize=14, fontweight='bold')
     ax2.set_xlabel("Traffic Intensity λ (req/s)", fontsize=12)
-    ax2.set_ylabel("Drop ratio", fontsize=12)
+    ax2.set_ylabel("violate ratio", fontsize=12)
     ax2.grid(True, linestyle="--", alpha=0.5)
 
     for scheduler in schedulers:
-        drop_vals = []
+        violate_vals = []
         valid_lams = []
         for lam in lambda_list:
             if lam not in results[scheduler]:
                 continue
             m = results[scheduler][lam]
-            drop_vals.append(m["drop_ratio"])
+            violate_vals.append(m["violate_ratio"])
             valid_lams.append(lam)
         
         if not valid_lams:
             continue
 
         lam_arr = np.array(valid_lams, dtype=np.float64)
-        drop_arr = np.array(drop_vals, dtype=np.float64)
+        violate_arr = np.array(violate_vals, dtype=np.float64)
 
         lw = 3 if scheduler == "ours_normalized" else 1.5
         ax2.plot(
             lam_arr,
-            drop_arr,
+            violate_arr,
             marker="s",
             linestyle="-",
             linewidth=lw,
@@ -126,38 +125,38 @@ def plot_results(
     ax2.set_ylim(0.0, 0.5)
     _set_x_ticks_40(ax2, lambda_list)
     fig2.tight_layout()
-    out_path2 = os.path.join(out_dir, "main_multi_model_drop_ratio_compare.png")
+    out_path2 = os.path.join(out_dir, "main_multi_model_violate_ratio_compare.png")
     plt.savefig(out_path2, dpi=150)
-    print(f"Drop ratio figure saved to: {out_path2}")
+    print(f"violate ratio figure saved to: {out_path2}")
     plt.close(fig2)
 
-    # Plot drop ratio without symphony for clearer comparison
+    # Plot violate ratio without symphony for clearer comparison
     schedulers_temp = [s for s in schedulers if s != "symphony"]
     fig3, ax3 = plt.subplots(figsize=(10, 5))
-    ax3.set_title("Scheduling Policy Impact on Drop Ratio (w/o Symphony)", fontsize=13, fontweight='bold')
+    ax3.set_title("Scheduling Policy Impact on violate Ratio (w/o Symphony)", fontsize=13, fontweight='bold')
     ax3.set_xlabel("Traffic Intensity λ (req/s)", fontsize=12)
-    ax3.set_ylabel("Drop ratio", fontsize=12)
+    ax3.set_ylabel("violate ratio", fontsize=12)
     ax3.grid(True, linestyle="-", alpha=0.5)
     for scheduler in schedulers_temp:
-        drop_vals = []
+        violate_vals = []
         valid_lams = []
         for lam in lambda_list:
             if lam not in results[scheduler]:
                 continue
             m = results[scheduler][lam]
-            drop_vals.append(m["drop_ratio"])
+            violate_vals.append(m["violate_ratio"])
             valid_lams.append(lam)
         
         if not valid_lams:
             continue
 
         lam_arr = np.array(valid_lams, dtype=np.float64)
-        drop_arr = np.array(drop_vals, dtype=np.float64)
+        violate_arr = np.array(violate_vals, dtype=np.float64)
 
         lw = 3 if scheduler == "ours_normalized" else 1.5
         ax3.plot(
             lam_arr,
-            drop_arr,
+            violate_arr,
             marker="s",
             linestyle="-",
             linewidth=lw,
@@ -168,9 +167,9 @@ def plot_results(
     ax3.set_ylim(0.0, 0.012)
     _set_x_ticks_40(ax3, lambda_list)
     fig3.tight_layout()
-    out_path3 = os.path.join(out_dir, "main_multi_model_drop_ratio_without_symphony_compare.png")
+    out_path3 = os.path.join(out_dir, "main_multi_model_violate_ratio_without_symphony_compare.png")
     plt.savefig(out_path3, dpi=150)
-    print(f"Drop ratio figure saved to: {out_path3}")
+    print(f"violate ratio figure saved to: {out_path3}")
     plt.close(fig3)
 
     # Separate figure: average early-exit depth vs traffic intensity
@@ -181,7 +180,7 @@ def plot_avg_exit_comparison(lambda_list, results, out_dir: str):
     """
     Plot average early-exit depth (completed tasks only) vs traffic intensity, comparing schedulers.
 
-    This is saved as a separate figure to avoid overloading the latency/drop plot.
+    This is saved as a separate figure to avoid overloading the latency/violate plot.
     """
     os.makedirs(out_dir, exist_ok=True)
 
@@ -270,14 +269,40 @@ def plot_avg_exit_comparison(lambda_list, results, out_dir: str):
         print(f"Avg early-exit figure saved to: {out_path}")
         plt.close(fig)
 
+def discover_lambda_values(logs_dir: str) -> list:
+    """
+    Automatically discover lambda values from folder names in logs_dir.
+
+    Scans for folders matching pattern like 'lam152_5', 'lam152_10', etc.
+    and extracts the number after the last underscore.
+
+    Returns:
+        Sorted list of lambda values (as integers)
+    """
+    if not os.path.exists(logs_dir):
+        print(f"[WARNING] Logs directory does not exist: {logs_dir}")
+        return []
+
+    lambda_values = []
+    for folder_name in os.listdir(logs_dir):
+        folder_path = os.path.join(logs_dir, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+
+        # Extract lambda from folder name (e.g., 'lam152_10' -> 10)
+        parts = folder_name.split('_')
+        if len(parts) >= 2:
+            try:
+                lam = int(parts[-1])
+                lambda_values.append(lam)
+            except ValueError:
+                continue
+
+    return sorted(lambda_values)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot multi-model intensity experiment results")
-    parser.add_argument(
-        "--lambdas",
-        type=str,
-        default="40,80,120,160,200",
-        help="Comma-separated list of lambda values.",
-    )
     parser.add_argument(
         "--schedulers",
         type=str,
@@ -311,11 +336,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     schedulers = [s.strip() for s in args.schedulers.split(",") if s.strip()]
-    lambda_list = [int(x) for x in args.lambdas.split(",") if x.strip()]
+    logs_base_dir = args.logs_dir
+
+    # Automatically discover lambda values from folder names
+    lambda_list = discover_lambda_values(logs_base_dir)
+    if not lambda_list:
+        print(f"[ERROR] No lambda values found in {logs_base_dir}")
+        print(f"[INFO] Expected folder naming pattern: lam152_<lambda>")
+        exit(1)
+    print(f"[INFO] Discovered lambda values: {lambda_list}")
+
     slo_ms = args.slo_ms
     slo_quantile = args.slo_quantile
     warmup_tasks = args.warmup_tasks
-    logs_base_dir = args.logs_dir
     
     # Derive figures_dir from logs_dir
     if "logs" in logs_base_dir:

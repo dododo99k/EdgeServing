@@ -104,21 +104,10 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
 
     # Try to get SLO violations from new format, fallback to old dropped format
     slo_violations_by_model = payload.get("slo_violations_by_model", None)
-    if slo_violations_by_model:
-        # New format: use pre-computed SLO violations
-        num_violations = sum(v["violations"] for v in slo_violations_by_model.values())
-        num_completed = sum(v["total"] for v in slo_violations_by_model.values())
-        violation_ratio = num_violations / num_completed if num_completed > 0 else 0.0
-    else:
-        # Fallback: compute from dropped_wait_times_by_model (old format)
-        dropped_wait_times_by_model = payload.get("dropped_wait_times_by_model", {})
-        num_violations = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
-        # Count completed tasks from total_time_by_model_exit
-        num_completed = 0
-        for exit_dict in total_time_by_model_exit.values():
-            for times in exit_dict.values():
-                num_completed += len(times)
-        violation_ratio = num_violations / (num_completed + num_violations) if (num_completed + num_violations) > 0 else 0.0
+
+    num_violations = sum(v["violations"] for v in slo_violations_by_model.values())
+    num_completed = sum(v["total"] for v in slo_violations_by_model.values())
+    violation_ratio = num_violations / num_completed if num_completed > 0 else 0.0
 
     exit_points = payload.get("exit_points")
     if not exit_points:
@@ -171,14 +160,14 @@ def compute_metrics(diag_path: str) -> Dict[str, Any]:
         "avg_exit_depth": avg_exit_depth,
         "throughput": throughput,
         # Keep old names for backward compatibility
-        "drop_ratio": slo_violation_ratio,
-        "num_dropped": int(num_violations),
+        # "drop_ratio": slo_violation_ratio,
+        # "num_dropped": int(num_violations),
     }
 
 
 def compute_objective(metrics: Dict[str, Any], slo_ms: float,
-                      w_violation: float = 50.0,
-                      w_depth: float = 0.3,
+                      w_violation: float = 30.0,
+                      w_depth: float = 100.0,
                       violation_threshold: float = 0.05) -> float:
     """
     Compute optimization objective (higher is better).
@@ -197,7 +186,7 @@ def compute_objective(metrics: Dict[str, Any], slo_ms: float,
           Only the actual violation ratio (% of tasks exceeding SLO) is optimized.
     """
     # Support both new and old metric names
-    violation_ratio = metrics.get("slo_violation_ratio", metrics.get("drop_ratio", 0.0))
+    violation_ratio = metrics.get("slo_violation_ratio")
     avg_depth = metrics["avg_exit_depth"]
     throughput = metrics["num_completed"]
 
@@ -210,16 +199,18 @@ def compute_objective(metrics: Dict[str, Any], slo_ms: float,
     # Additional exponential penalty when violation_ratio > threshold
     if violation_ratio > violation_threshold:
         excess_violation = violation_ratio - violation_threshold
-        violation_penalty += 100.0 * (np.exp(excess_violation * 10) - 1)
+        violation_penalty += 10.0 * (np.exp(excess_violation * 10) - 1)
 
     # Hard constraint: if violation_ratio > 20%, severely penalize
     if violation_ratio > 0.20:
         violation_penalty += 1000.0
 
     # Objective: maximize depth while minimizing violations
+    # Use sqrt to create non-linear reward: strongly discourage depth=1, diminishing returns at higher depths
+
     score = (
         - violation_penalty              # Heavily penalize SLO violations (ratio)
-        + w_depth * (avg_depth / 4)      # Reward deeper exits (normalized to 0-1)
+        + w_depth * np.sqrt((avg_depth - 1) / 3)         # Reward deeper exits with non-linear scaling
         + 0.001 * throughput / 1000      # Small bonus for throughput
     )
 
@@ -231,9 +222,9 @@ def bayesian_search(args) -> Dict[str, Any]:
     
     def objective(trial: optuna.Trial) -> float:
         # Sample parameters with informed priors
-        w_slo_n = trial.suggest_float("w_slo_n", 0.001, 2.0, log=True)
-        w_acc_n = trial.suggest_float("w_acc_n", 0.001, 2.0, log=True)
-        slo_penalty_target_n = trial.suggest_float("slo_penalty_target_n", 0.5, 3.0)
+        w_slo_n = trial.suggest_float("w_slo_n", 0.00001, 20.0, log=True)
+        w_acc_n = trial.suggest_float("w_acc_n", 0.00001, 20.0, log=True)
+        slo_penalty_target_n = trial.suggest_float("slo_penalty_target_n", 0.01, 3.0)
         
         try:
             metrics = run_single_experiment(
@@ -257,7 +248,7 @@ def bayesian_search(args) -> Dict[str, Any]:
             trial.set_user_attr("slo_violation_ratio", metrics["slo_violation_ratio"])
             trial.set_user_attr("avg_exit_depth", metrics["avg_exit_depth"])
 
-            print(f"  → p95={metrics['p95_ms']:.2f}ms, slo_viol={metrics['slo_violation_ratio']:.3f}, "
+            print(f"  → p95={metrics['p95_ms']:.2f}ms, slo_vio={metrics['slo_violation_ratio']:.3f}, "
                   f"depth={metrics['avg_exit_depth']:.2f}, score={score:.4f}")
             
             return score
@@ -274,9 +265,13 @@ def bayesian_search(args) -> Dict[str, Any]:
     )
     
     # Add some good starting points based on prior knowledge
-    study.enqueue_trial({"w_slo_n": 0.1150, "w_acc_n": 0.1022, "slo_penalty_target_n": 2.8131})  # Default
-    study.enqueue_trial({"w_slo_n": 0.001, "w_acc_n": 0.5, "slo_penalty_target_n": 1.0})
-    study.enqueue_trial({"w_slo_n": 1.5, "w_acc_n": 0.2, "slo_penalty_target_n": 2.0})
+    # Strategy: Use much higher w_acc_n to overcome layer1's 3x speed advantage with linear normalization
+    study.enqueue_trial({"w_slo_n": 0.01, "w_acc_n": 15.0, "slo_penalty_target_n": 1.0})    # Very high accuracy weight
+    study.enqueue_trial({"w_slo_n": 0.001, "w_acc_n": 10.0, "slo_penalty_target_n": 1.5})  # High accuracy, very low SLO
+    study.enqueue_trial({"w_slo_n": 0.05, "w_acc_n": 12.0, "slo_penalty_target_n": 0.5})   # High accuracy, low target
+    study.enqueue_trial({"w_slo_n": 0.5, "w_acc_n": 8.0, "slo_penalty_target_n": 2.0})     # Medium-high accuracy, balanced
+    study.enqueue_trial({"w_slo_n": 0.1, "w_acc_n": 5.0, "slo_penalty_target_n": 1.0})     # Medium accuracy weight
+    study.enqueue_trial({"w_slo_n": 0.1, "w_acc_n": 1.45, "slo_penalty_target_n": 1.64})   # Previous best (baseline)
     
     study.optimize(objective, n_trials=args.n_trials, show_progress_bar=True)
     
@@ -436,15 +431,15 @@ def main():
     parser.add_argument("--method", type=str, default="bayesian",
                         choices=["bayesian", "coarse-to-fine"],
                         help="Search method: 'bayesian' (requires optuna) or 'coarse-to-fine'")
-    parser.add_argument("--lam", type=float, default=50,
+    parser.add_argument("--lam", type=float, default=160,
                         help="Base lambda value for Poisson arrival rate")
-    parser.add_argument("--n-trials", type=int, default=50,
+    parser.add_argument("--n-trials", type=int, default=30,
                         help="Number of trials for Bayesian optimization")
-    parser.add_argument("--run-seconds", type=int, default=60,
+    parser.add_argument("--run-seconds", type=int, default=30,
                         help="Duration of each run in seconds")
     parser.add_argument("--run-seconds-coarse", type=int, default=10,
                         help="Shorter duration for coarse search stage")
-    parser.add_argument("--slo-ms", type=float, default=50.0,
+    parser.add_argument("--slo-ms", type=float, default=20.0,
                         help="Total latency SLO in milliseconds")
     parser.add_argument("--slo-quantile", type=str, default="p95_ms",
                         choices=["mean_ms", "p50_ms", "p90_ms", "p95_ms", "p99_ms"])
@@ -489,3 +484,4 @@ if __name__ == "__main__":
     main()
     # use command delete ./logs/
     subprocess.run(["rm", "-rf", "./logs/"])
+    subprocess.run(["rm", "-rf", "./figures/"])

@@ -43,6 +43,7 @@ Diagnostics:
 """
 
 import argparse
+from re import DEBUG
 import threading
 import time
 import queue
@@ -52,6 +53,7 @@ import pickle
 import json
 
 import math
+from math import sqrt
 
 import numpy as np
 import matplotlib
@@ -69,26 +71,76 @@ from early_exit_resnets import build_early_exit_resnets
 
 import os  # add this at the top of the file if not present
 
+DEBUG = True
+
 # Virtual SLO queue per model: model_name -> float
 VIRTUAL_SLO_QUEUE = {}
+
+# Z limits for preventing starvation
+Z_MAX = 1000.0  # Maximum Z value to prevent unbounded growth
 
 # Weights for SLO penalty and accuracy loss in algorithm_ours.
 # Allow overrides via environment variables for grid search.
 W_SLO = float(os.getenv("W_SLO", "1.5"))
-W_ACC = float(os.getenv("W_ACC", "0.1"))
+W_ACC = float(os.getenv("W_ACC", "0.3"))
 
 # Target average SLO penalty per batch used in virtual queue update
 SLO_PENALTY_TARGET = float(os.getenv("SLO_PENALTY_TARGET", "0.1"))
 
 # Weights for SLO penalty and accuracy loss in algorithm_ours_normalized.
-# Allow overrides via environment variables for grid search.
-# first version 1 0.3 1.5
-# second  0.1 1.2 1.3]
-W_SLO_N = float(os.getenv("W_SLO_N", "0.0229"))
-W_ACC_N = float(os.getenv("W_ACC_N", "0.4238"))
 
 # Target average SLO penalty per batch used in virtual queue update
-SLO_PENALTY_TARGET_N = float(os.getenv("SLO_PENALTY_TARGET_N", "0.7445"))
+# 0.03 0.2 0.8
+SLO_PENALTY_TARGET_N = float(os.getenv("SLO_PENALTY_TARGET_N", "0.05"))
+# W_SLO_N = float(os.getenv("W_SLO_N", "0.2"))
+W_SLO_N = float(os.getenv("W_SLO_N", "1"))
+W_ACC_N = float(os.getenv("W_ACC_N", "0.8"))
+# W_ACC_N = float(os.getenv("W_ACC_N", "0"))
+# W_ACC_N = float(os.getenv("W_ACC_N", "0"))
+# Penalties designed based on inference time analysis to compensate for time normalization
+# Score formula: (Q*B - W_SLO_N*Z*B*slo_pen - W_ACC_N*B*acc_pen) / sqrt(infer_ms)
+# Using sqrt normalization to reduce speed advantage of early exits (3x -> 1.73x)
+# Penalties use sqrt(1 - t_i/t_final) compression to create smooth ratios
+#
+# Inference times (batch=5): ResNet50: 1.65/2.79/4.20/5.06ms
+#                            ResNet101: 1.66/2.79/8.32/9.24ms   
+#                            ResNet152: 1.67/3.69/12.61/13.53ms
+# Calculated penalties: ResNet50:  0.205/0.168/0.103/0.0
+#                       ResNet101: 0.227/0.209/0.079/0.0
+#                       ResNet152: 0.234/0.213/0.065/0.0
+# Penalty ratios: ResNet50: 2.0:1.6:1.0:0 (vs old 7.5:3.1:1:0)
+#                 ResNet101: 2.9:2.6:1.0:0 (vs old 15:8.75:1:0)
+#                 ResNet152: 3.6:3.3:1.0:0 (vs old 20:10.7:1:0)
+# ACCURACY_PENALTIES_N = {
+#     "ResNet50":  {"layer1": 0.4*2, "layer2": 0.2, "layer3": 0.03, "final": 0.0},
+#     "ResNet101": {"layer1": 0.4*2, "layer2": 0.3, "layer3": 0.03, "final": 0.0},
+#     "ResNet152": {"layer1": 0.5*2, "layer2": 0.35, "layer3": 0.03, "final": 0.0},
+# }
+# use postive formulation, means get how much accuracy we can get for each exit and model
+# ACCURACY_PENALTIES = {
+#     "ResNet50":  {"layer1": -0.1, "layer2": -2.5, "layer3": -4, "final": -4.5},
+#     "ResNet101": {"layer1": -0.1, "layer2": -3.5, "layer3": -6.6, "final": -6.8},
+#     "ResNet152": {"layer1": -0.2, "layer2": -6, "layer3": -9.9, "final": -10},
+# }
+# r50_coeff = 3
+# r101_coeff = 1.2
+# r152_coeff = 0.8
+
+# r50_coeff = 2.5
+# r101_coeff = 1.6
+# r152_coeff = 1.4
+# r50_coeff = 2.5
+# r101_coeff = 1.6
+# r152_coeff = 2
+r50_coeff = 2.5
+r101_coeff = 1.8
+r152_coeff = 2.2
+
+ACCURACY_PENALTIES = {
+    "ResNet50":  {"layer1": -0.05*r50_coeff, "layer2": -2.5*r50_coeff, "layer3": -4*r50_coeff, "final": -4.5*r50_coeff},
+    "ResNet101": {"layer1": -0.1*r101_coeff, "layer2": -3.3*r101_coeff, "layer3": -6.6*r101_coeff, "final": -6.8*r101_coeff},
+    "ResNet152": {"layer1": -0.2*r152_coeff, "layer2": -6*r152_coeff, "layer3": -9.9*r152_coeff, "final": -10*r152_coeff},
+}
 # ========================
 # Global task id generator
 # ========================
@@ -153,12 +205,19 @@ def poisson_request_generator(
     req_queue: queue.Queue,
     stop_event: threading.Event,
     input_shape=(3, 224, 224),
+    warmup_complete: threading.Event = None,
 ):
     """
     Generate tasks according to a Poisson process for a single model.
     lam: intensity (requests per second).
     Inter-arrival times ~ Exp(rate=lam), mean = 1/lam.
     """
+    # Wait for scheduler warmup to complete before generating tasks
+    if warmup_complete is not None:
+        print(f"[Generator-{model_name}] Waiting for scheduler warmup...")
+        warmup_complete.wait()
+        print(f"[Generator-{model_name}] Warmup complete, starting generation")
+
     while not stop_event.is_set():
         if lam > 0:
             dt = np.random.exponential(scale=1.0 / lam)
@@ -170,10 +229,10 @@ def poisson_request_generator(
         task = InferenceTask(model_name=model_name, input_tensor=x)
         req_queue.put(task)
 
-        print(
-            f"[Generator-{model_name}] New task {task.task_id} at "
-            f"{task.arrival_time:.6f}"
-        )
+        # print(
+        #     f"[Generator-{model_name}] New task {task.task_id} at "
+        #     f"{task.arrival_time:.6f}"
+        # )
 
 
 # ========================
@@ -277,23 +336,14 @@ def choose_exit_id_from_profile(
     return fallback_exit, infer_ms, total_ms
 
 
-# Hardcoded penalties based on ResNet block structure
-# Penalty = (skipped_blocks / total_blocks) * 4.0
-ACCURACY_PENALTIES = {
-    "ResNet50":  {"layer1": 3.25, "layer2": 2.25, "layer3": 0.75, "final": 0.0},
-    "ResNet101": {"layer1": 3.64, "layer2": 3.15, "layer3": 0.36, "final": 0.0},
-    "ResNet152": {"layer1": 3.76, "layer2": 3.12, "layer3": 0.24, "final": 0.0},
-}
-
 def build_accuracy_penalty(model_names, exit_points):
     """
     Build accuracy penalty dict for all models: acc_penalty[model_name][exit_id]
     """
-    fallback = {"layer1": 3.0, "layer2": 2.0, "layer3": 1.0, "final": 0.0}
     result = {}
     for m in model_names:
         base_model = m.split("_")[0]  # "ResNet50_0" -> "ResNet50"
-        base = ACCURACY_PENALTIES.get(base_model, fallback)
+        base = ACCURACY_PENALTIES.get(base_model)
         result[m] = {e: base.get(e, 0.0) for e in exit_points}
     return result
 
@@ -302,22 +352,23 @@ def compute_avg_slo_penalty(
     wait_ms_list,
     infer_ms: float,
     slo_ms: float,
+    ignore_wait: bool = False,
 ) -> float:
     """
-    Average SLO penalty over a list of requests, where for each
-    request i we approximate its TOTAL latency as:
+    Average SLO penalty over a list of requests.
 
-        total_i = wait_i + infer_ms
+    Two modes:
+    1. ignore_wait=False (default):
+       Used for virtual queue updates (measuring actual outcome)
+       total_i = wait_i + infer_ms
 
-    and the penalty is
+    2. ignore_wait=True:
+       Used for scheduling decisions (action cost, not outcome)
+       total = 0 + infer_ms (same penalty for all tasks)
+       Prevents penalizing models that are already backlogged.
 
-        y_i = -log((slo_ms - total_i) / slo_ms),
-
+    Penalty formula: y_i = -log((slo_ms - total_i) / slo_ms)
     with a small epsilon when slack <= 0.
-
-    This makes the penalty depend on:
-      - the current waits, and
-      - the batch's inference time (which depends on exit and B).
     """
     if not wait_ms_list:
         return 0.0
@@ -326,15 +377,36 @@ def compute_avg_slo_penalty(
         infer_ms = 0.0  # graceful fallback
 
     eps_ms = 1e-3
-    ys = []
-    for w in wait_ms_list:
-        total = float(w) + float(infer_ms)
-        slack = slo_ms - total
-        if slack <= 0.0:
-            slack = eps_ms
-        ys.append(-math.log(slack / slo_ms))
-
-    return float(sum(ys) / len(ys))
+    base_penalty = -math.log(eps_ms / slo_ms)
+    
+    if ignore_wait:
+        # Action-cost mode: only consider inference time
+        # All tasks in batch get same penalty
+        ys = []
+        for w in wait_ms_list:
+            total = float(w) + float(infer_ms)
+            slack = slo_ms - total
+            if slack >0:
+                ys.append(-math.log(slack / slo_ms))
+            else:
+                overshoot = -slack
+                ys.append(base_penalty + overshoot / slo_ms * 10)  # linear penalty beyond SLO
+            return float(sum(ys) / len(ys))
+        # slack = slo_ms - infer_ms
+        # if slack <= 0.0:
+        #     slack = eps_ms
+        # return float(-math.log(slack / slo_ms))
+    else:
+        # Outcome mode: consider wait + inference time
+        # Each task gets penalty based on its total latency
+        ys = []
+        for w in wait_ms_list:
+            total = float(w) + float(infer_ms)
+            slack = slo_ms - total
+            if slack <= 0.0:
+                slack = eps_ms
+            ys.append(-math.log(slack / slo_ms))
+        return float(sum(ys) / len(ys))
 
 
 
@@ -369,15 +441,28 @@ def algorithm_early_exit(
     If no tasks are available, returns None.
     """
     model_names = list(models.keys())
-
+    now = time.perf_counter()
     # Pick the model with the longest queue
+    # longest-queue-first (LQF)
     best_model = None
     best_qsize = 0
+    earliest_time = None
+    earliest_model = None
     for m in model_names:
         qsize = queues[m].qsize()
         if qsize > best_qsize:
             best_qsize = qsize
             best_model = m
+        # get first task wait time, FCFS style
+        task_list = list(queues[m].queue)
+        if task_list:
+            wait_time = (now - task_list[0].arrival_time) * 1000.0
+            if earliest_time is None or wait_time > earliest_time:
+                earliest_time = wait_time
+                earliest_model = m
+                
+    # FCFS: pick first non-empty queue
+    best_model = earliest_model
 
     if best_model is None or best_qsize == 0:
         return None
@@ -658,6 +743,7 @@ def algorithm_symphony(
     quantile_key: str,
     profile_results_by_model: dict,
     warmup_tasks: int,
+    dropped_wait_times_by_model: dict = None,
 ):
     """
     Symphony-style deferred batching:
@@ -670,6 +756,8 @@ def algorithm_symphony(
       - When scheduling, drop tasks that already exceed SLO and then choose
         the deepest exit that meets the SLO for the resulting batch.
     """
+    if dropped_wait_times_by_model is None:
+        dropped_wait_times_by_model = {}
     model_names = list(models.keys())
     if not model_names:
         return None
@@ -774,6 +862,26 @@ def algorithm_symphony(
         return None
 
     now2 = time.perf_counter()
+    slo_sec = latency_threshold_ms / 1000.0
+
+    # Drop tasks that have already exceeded SLO (Symphony behavior)
+    kept_tasks = []
+    if model_name not in dropped_wait_times_by_model:
+        dropped_wait_times_by_model[model_name] = []
+
+    for t in batch_tasks:
+        wait_time_sec = now2 - t.arrival_time
+        if wait_time_sec > slo_sec:
+            # Task has already exceeded SLO - drop it
+            dropped_wait_times_by_model[model_name].append(wait_time_sec)
+        else:
+            kept_tasks.append(t)
+
+    if not kept_tasks:
+        # All tasks were dropped
+        return None
+
+    batch_tasks = kept_tasks
     batch_size = len(batch_tasks)
 
     wait_times_sec = [now2 - t.arrival_time for t in batch_tasks]
@@ -848,6 +956,8 @@ def algorithm_ours(
     acc_penalty = build_accuracy_penalty(model_names, exit_points)
     now = time.perf_counter()
 
+    # before calling this function
+
     best_score = -float("inf")
     best_model = None
     best_B = None
@@ -855,7 +965,7 @@ def algorithm_ours(
     best_pred_infer_ms = None
 
     scores = {}
-    
+
     # -------------------------
     # Search over (m, B, e)
     # -------------------------
@@ -999,12 +1109,12 @@ def algorithm_ours_normalized(
         Score(m, B, e) = ( Q_m * B
                            - W_SLO * Z[m] * avg_slo
                            - W_ACC * B * acc_pen(e)
-                         ) / infer_ms(e, B)
+                         ) / sqrt(infer_ms(e, B))
 
       - The rest of the logic is identical to 'ours'.
     """
     global VIRTUAL_SLO_QUEUE
-
+    global DEBUG
     # Initialize virtual queues lazily
     for m in models.keys():
         VIRTUAL_SLO_QUEUE.setdefault(m, 0.0)
@@ -1015,18 +1125,41 @@ def algorithm_ours_normalized(
     non_empty_models = [m for m in model_names if not queues[m].empty()]
     if not non_empty_models:
         return None
+    
+    model_sizes = {}
+    for m in non_empty_models:
+        q = queues[m]
+        Qm = q.qsize()
+        model_sizes[m] = Qm
+    #choose max model size if model size >10
+    max_model_size = max(model_sizes.values())
+    if max_model_size >10:
+        non_empty_models = [m for m in non_empty_models if model_sizes[m] == max_model_size]
 
     acc_penalty = build_accuracy_penalty(model_names, exit_points)
     now = time.perf_counter()
+
+    # before calling this function
 
     best_score = -float("inf")
     best_model = None
     best_B = None
     best_exit = None
     best_pred_infer_ms = None
+    best_part1 = None
+    best_part2 = None
+    best_part3 = None
 
     scores = {}
-    
+    # # print Q and Z snapshots for debugging
+    print(f"\n[Lyapunov State]")
+    print("Model          | Q (queue size) | Z (virtual SLO queue)")
+    print("-" * 60)
+    for m in sorted(models.keys()):
+        Q_m = queues[m].qsize()
+        Z_m = VIRTUAL_SLO_QUEUE.get(m, 0.0)
+        print(f"{m:<14} | {Q_m:>14d} | {Z_m:>22.4f}")
+    print("-" * 60)
     # -------------------------
     # Search over (m, B, e)
     # -------------------------
@@ -1042,12 +1175,14 @@ def algorithm_ours_normalized(
         scores[m] = []
         # Snapshot of queue contents for *peeking* (do not modify queue yet)
         pending_tasks = list(q.queue)
-
-        ##### note that we use the max_B directly, without optimization #####
         
-        # Waits for first B tasks (in ms)
+        # Wait time for first 10 B tasks (in ms)
         waits_ms = [ (now - pending_tasks[i].arrival_time) * 1000.0 for i in range(max_B) ]
-
+        waits_ms_t = [round(w, 3) for w in waits_ms]
+        #
+        max_wait = max(waits_ms) if waits_ms else 0.0
+        if DEBUG:
+            print(f"[DEBUG] Model: {m}, waits_ms: {waits_ms_t}")
         for e in exit_points:
             # B = max_B
             for B in range(1, max_B + 1):
@@ -1058,26 +1193,43 @@ def algorithm_ours_normalized(
                     quantile_key=quantile_key,
                 )
                 if infer_ms is None or infer_ms <= 1e-6: continue # Avoid division by zero/small number
-
-                # SLO penalty now depends on BOTH waits and infer_ms(exit, B)
+                if True and infer_ms + max_wait > latency_threshold_ms: # Skip actions that cannot meet SLO even for max wait
+                    if e == exit_points[0]:
+                        pass
+                    else:
+                        continue
+                
+                # SLO penalty for scheduling: only consider action cost (ignore historical wait)
+                # This prevents penalizing backlogged models and avoids starvation
                 avg_slo_pen = compute_avg_slo_penalty(
                     wait_ms_list=waits_ms[:B],
                     infer_ms=infer_ms,
                     slo_ms=latency_threshold_ms,
+                    ignore_wait=True,  # Use action-cost mode for scheduling
                 )
+                slo_violation_number = sum(1 for w in waits_ms[:B] if (w + infer_ms) > latency_threshold_ms)
 
                 Zm = VIRTUAL_SLO_QUEUE[m]
                 acc_pen = acc_penalty[m][e]
 
-                unnormalized_score = (
-                    Qm * B
-                    - W_SLO_N * Zm * B * avg_slo_pen
-                    - W_ACC_N * B * acc_pen
-                )
+                # time normalization factor
+                temp_time = infer_ms ** 0.4 #math.cbrt(infer_ms)
                 
-                score = unnormalized_score / infer_ms
-
+                # Linear normalization (default - works with properly tuned W_ACC_N)
+                # All terms normalized by inference time
+                # part1 = Qm * B / temp_time
+                part1 = sum(waits_ms[:B]) / temp_time
+                # part1 = Qm * B / infer_ms
+                # part2 = - W_SLO_N * Zm  * avg_slo_pen / temp_time
+                part2 = - W_SLO_N * Zm * slo_violation_number + Zm * B * SLO_PENALTY_TARGET_N
+                part3 = - W_ACC_N * B * acc_pen
+                score = part1 + part2 + part3
+                if DEBUG:
+                    print(f"[DEBUG] infer={infer_ms:.4f} Action: (B={B}, Exit={e}) Violation:{slo_violation_number} => Score Parts: {part1:.4f}, {part2:.4f}, {part3:.4f} => Total Score: {score:.4f}")
                 if score > best_score:
+                    best_part1 = part1
+                    best_part2 = part2
+                    best_part3 = part3
                     best_score = score
                     best_model = m
                     best_B = B
@@ -1085,9 +1237,13 @@ def algorithm_ours_normalized(
                     best_pred_infer_ms = infer_ms
 
                 scores[m].append(score)
-
+    # debug
+    if DEBUG:
+        print(f"[DEBUG] [Decision Details]: {best_model}, {best_B}, {best_exit}")
+        print(f"[DEBUG] [Score Details]: {best_part1}, {best_part2}, {best_part3}")
     # If no candidate found, fall back to all_early baseline
     if best_model is None:
+        print("[Warning!!] No candidate found in ours_normalized; falling back to all_early")
         return algorithm_all_early(
             models=models,
             queues=queues,
@@ -1167,6 +1323,8 @@ def scheduler(
     wait_time_by_model_exit: dict,
     infer_time_by_model_exit: dict,
     batch_diag: list,
+    dropped_wait_times_by_model: dict = None,
+    warmup_complete: threading.Event = None,
 ):
     """
     Central scheduler loop:
@@ -1186,6 +1344,28 @@ def scheduler(
             - update virtual SLO queue if scheduler_type == "ours" or "ours_normalized"
     """
     models_eval = {k: v.eval() for k, v in models.items()}
+
+    # Initialize dropped_wait_times tracking if not provided
+    if dropped_wait_times_by_model is None:
+        dropped_wait_times_by_model = {}
+
+    # Warmup GPU in scheduler thread to eliminate first-inference overhead
+    print("[Scheduler] Warming up GPU in scheduler thread...")
+    warmup_start = time.time()
+    for model_name, model_eval in models_eval.items():
+        for exit_id in exit_points:
+            dummy_input = torch.randn(10, 3, 224, 224, dtype=torch.float32).to(device)
+            with torch.no_grad():
+                _ = model_eval(dummy_input, exit_id=exit_id)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+    warmup_time = time.time() - warmup_start
+    print(f"[Scheduler] GPU warmup completed in {warmup_time:.2f}s")
+
+    # Signal that warmup is complete so generators can start
+    if warmup_complete is not None:
+        warmup_complete.set()
+        print("[Scheduler] Signaled warmup completion to generators")
 
     while not stop_event.is_set():
         # If all queues are empty, sleep briefly
@@ -1248,6 +1428,7 @@ def scheduler(
                 quantile_key=quantile_key,
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
+                dropped_wait_times_by_model=dropped_wait_times_by_model,
             )
         elif scheduler_type == "ours":
             result = algorithm_ours(
@@ -1317,7 +1498,13 @@ def scheduler(
         non_warmup_count = 0
         wait_ms_list_for_slo = []
 
-        for t in batch_tasks:
+
+
+
+        # batch information
+        # print(f"[Scheduler-{model_name}] Batch_id={len(batch_diag)}, exit={exit_id}, batch_size={batch_size}")
+        slo_violations = 0
+        for i,t in enumerate(batch_tasks):
             t.end_infer_time = end_infer_time
             total_s = t.total_time
             if total_s is None: continue
@@ -1325,15 +1512,16 @@ def scheduler(
             wait_s = t.wait_time
             infer_s = t.inference_time
             total_ms = total_s * 1000.0
-
-            print(
-                f"[Scheduler-{model_name}][{scheduler_type}] Task {t.task_id}, "
-                f"exit={t.exit_id_used}, "
-                f"wait={wait_s*1000:.2f} ms, "
-                f"infer={infer_s*1000:.2f} ms, "
-                f"total={total_ms:.2f} ms, "
-                f"batch_size={len(batch_tasks)}"
-            )
+            if total_ms > latency_threshold_ms:
+                slo_violations += 1
+            # if i ==0:
+            #     print(f"Infer={infer_s*1000:.2f} ms, Task {t.task_id}, wait={wait_s*1000:.2f} ms, total={total_ms:.2f} ms", end="")
+            # else:
+            #     print(
+            #         f", Task {t.task_id}, "
+            #         f"wait={wait_s*1000:.2f} ms, "
+            #         f"total={total_ms:.2f} ms, ",end=""
+            #     )
 
             if t.task_id >= warmup_tasks:
                 non_warmup_count += 1
@@ -1344,6 +1532,7 @@ def scheduler(
                 wait_ms_list_for_slo.append(wait_s * 1000.0)
                 if total_ms > max_total_ms:
                     max_total_ms = total_ms
+        # print("")  # Newline after batch task info
 
         if non_warmup_count > 0:
             batch_diag.append(
@@ -1369,24 +1558,48 @@ def scheduler(
                     slo_ms=latency_threshold_ms,
                 )
 
+                # Time-normalized virtual queue update (time in milliseconds)
+                # current_time_ms = time.perf_counter() * 1000.0
+                # if model_name not in LAST_VIRTUAL_QUEUE_UPDATE_TIME:
+                #     # First update: use a default time interval (e.g., 100 ms)
+                #     time_delta_ms = 100.0
+                # else:
+                #     time_delta_ms = current_time_ms - LAST_VIRTUAL_QUEUE_UPDATE_TIME[model_name]
+
+                # LAST_VIRTUAL_QUEUE_UPDATE_TIME[model_name] = current_time_ms
+
                 Z_old = VIRTUAL_SLO_QUEUE.get(model_name, 0.0)
+
+                # Calculate decay for the entire time period since last update
                 if scheduler_type == "ours":
+                    # Time-normalized update with decay: Z' = (Z - decay) + delta*penalty
                     Z_new = max(
-                        Z_old + (avg_pen_actual - SLO_PENALTY_TARGET),
+                        min(
+                            Z_old + (avg_pen_actual - SLO_PENALTY_TARGET),
+                            Z_MAX
+                        ),
                         0.0,
                     )
                 else: # ours_normalized
-                    Z_new = max(
-                        Z_old + (avg_pen_actual - SLO_PENALTY_TARGET_N),
-                        0.0,
-                    )
+                    # Time-normalized update with decay and batch size
+                    # Z_new = max(
+                    #     min(
+                    #         Z_after_decay + actual_infer_ms/1000 * non_warmup_count * (avg_pen_actual - SLO_PENALTY_TARGET_N),
+                    #         Z_MAX
+                    #     ),
+                    #     0.0,
+                    # )
+                    
+                    # Z_new = max(min(Z_after_decay + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
+                    
+                    Z_new = max(min(Z_old + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
                 VIRTUAL_SLO_QUEUE[model_name] = Z_new
-                        
-                
+
+
                 print(
                     f"[Scheduler-{model_name}][{scheduler_type}] Z_old={Z_old:.4f}, "
                     f"avg_slo_pen_actual={avg_pen_actual:.4f}, "
-                    f"Z_new={Z_new:.4f}"
+                    f"Z_new={Z_new:.4f} (max={Z_MAX})"
                 )
 
 
@@ -1723,7 +1936,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42, # 66666
+        default=666666, # 66666
         help="Seed for NumPy RNG (Poisson arrivals).",
     )
     parser.add_argument(
@@ -1762,7 +1975,10 @@ def main():
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    print(f"Scheduler: {scheduler_type}, w_slo={W_SLO}, w_acc={W_ACC}, slo_target={SLO_PENALTY_TARGET}")
+    if scheduler_type == "ours_normalized":    
+        print(f"Scheduler: {scheduler_type}, w_slo={W_SLO_N}, w_acc={W_ACC_N}, slo_target={SLO_PENALTY_TARGET_N}")
+    else:
+        print(f"Scheduler: {scheduler_type}")
     print(f"SLO (total latency): {latency_threshold_ms} ms on {quantile_key}")
     print(f"Warmup tasks (per model): {warmup_tasks}")
 
@@ -1842,19 +2058,35 @@ def main():
     wait_time_by_model_exit = {m: {e: [] for e in exit_points} for m in models.keys()}
     infer_time_by_model_exit = {m: {e: [] for e in exit_points} for m in models.keys()}
     batch_diag = []
+    dropped_wait_times_by_model = {m: [] for m in models.keys()}
 
-    # Control
+    # ========================
+    # GPU Warmup (eliminate first-inference overhead)
+    # ========================
+    print("\nWarming up GPU...")
+    warmup_start = time.time()
+
+    for model_name, model in models.items():
+        model_eval = model.eval()
+        for exit_id in exit_points:
+            # Create dummy input
+            dummy_input = torch.randn(10, 3, 224, 224, dtype=torch.float32).to(device)
+
+            # Run inference
+            with torch.no_grad():
+                _ = model_eval(dummy_input, exit_id=exit_id)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+
+    warmup_time = time.time() - warmup_start
+    print(f"GPU warmup completed in {warmup_time:.2f}s")
+    print(f"All models and exits are now ready for simulation.\n")
+
+    # Control events
     stop_event = threading.Event()
-    
-    # Update generator threads with stop_event
-    for thread in gen_threads:
-        # Recreate thread with stop_event
-        old_args = thread._args
-        thread._args = (old_args[0], old_args[1], old_args[2], stop_event)
-    for t in gen_threads:
-        t.start()
+    warmup_complete = threading.Event()  # Signal when scheduler warmup is done
 
-    # Central scheduler thread
+    # Central scheduler thread (start FIRST so it can warmup before generators start)
     sched_thread = threading.Thread(
         target=scheduler,
         args=(
@@ -1874,10 +2106,21 @@ def main():
             wait_time_by_model_exit,
             infer_time_by_model_exit,
             batch_diag,
+            dropped_wait_times_by_model,
+            warmup_complete,  # Pass warmup_complete event
         ),
         daemon=True,
     )
     sched_thread.start()
+
+    # Update generator threads with stop_event and warmup_complete
+    for thread in gen_threads:
+        # Recreate thread args: (model_name, lam, queue, stop_event, input_shape, warmup_complete)
+        old_args = thread._args
+        # old_args = (model_name, lam, queue, None)
+        thread._args = (old_args[0], old_args[1], old_args[2], stop_event, (3, 224, 224), warmup_complete)
+    for t in gen_threads:
+        t.start()
 
     # Run simulation
     print(f"Running simulation for {run_seconds} seconds...")
@@ -1948,6 +2191,28 @@ def main():
             f"Total: {total_violations}/{total_tasks} tasks "
             f"({overall_violation_ratio*100:.2f}% exceeded {latency_threshold_ms:.0f} ms SLO)"
         )
+
+    # Dropped tasks summary (only for schedulers that drop)
+    total_dropped = sum(len(dropped_wait_times_by_model[m]) for m in models.keys())
+    if total_dropped > 0:
+        print(f"\n=== Dropped tasks [{scheduler_type}] ===")
+        for m in models.keys():
+            num_dropped = len(dropped_wait_times_by_model[m])
+            if num_dropped > 0:
+                drop_waits_ms = np.array(dropped_wait_times_by_model[m]) * 1000.0
+                print(
+                    f"{m}: {num_dropped} dropped, "
+                    f"avg_wait={drop_waits_ms.mean():.2f} ms, "
+                    f"max_wait={drop_waits_ms.max():.2f} ms"
+                )
+        num_completed = sum(len(total_time_by_model[m]) for m in models.keys())
+        total_generated = total_dropped + num_completed
+        drop_ratio = total_dropped / total_generated if total_generated > 0 else 0.0
+        print(
+            f"Total: {total_dropped}/{total_generated} tasks dropped "
+            f"({drop_ratio*100:.2f}% drop ratio)"
+        )
+
     # Average early-exit depth (weighted by completed, non-warmup tasks)
     avg_stats, _depth_map = compute_avg_early_exit_stats(total_time_by_model_exit, exit_points)
     max_depth = len(exit_points)
@@ -2008,6 +2273,7 @@ def main():
         "wait_time_by_model_exit": wait_time_by_model_exit,
         "infer_time_by_model_exit": infer_time_by_model_exit,
         "slo_violations_by_model": slo_violations_by_model,
+        "dropped_wait_times_by_model": dropped_wait_times_by_model,
         "batch_diag": batch_diag,
     }
     diag_path = os.path.join(logs_dir, f"multi_model_diag_{scheduler_type}.pkl")
