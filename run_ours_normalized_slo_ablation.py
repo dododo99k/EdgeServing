@@ -266,7 +266,7 @@ def main():
     parser.add_argument(
         "--slo-ms",
         type=str,
-        default="5,10,15,20,25,30",
+        default="20,30,40,50,60,70",
         help="Comma-separated list of SLO thresholds in milliseconds to test (e.g., '10,15,20,25,30').",
     )
     parser.add_argument(
@@ -278,7 +278,7 @@ def main():
     parser.add_argument(
         "--run-seconds",
         type=int,
-        default=30,
+        default=20,
         help="Duration of each run in seconds.",
     )
     parser.add_argument(
@@ -418,3 +418,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    subprocess.run(["python", "plot_slo_ablation_comparison.py"], check=True)

@@ -1328,6 +1328,7 @@ def scheduler(
     dropped_wait_times_by_model: dict = None,
     warmup_complete: threading.Event = None,
 ):
+    global DEBUG
     """
     Central scheduler loop:
 
@@ -1597,12 +1598,12 @@ def scheduler(
                     Z_new = max(min(Z_old + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
                 VIRTUAL_SLO_QUEUE[model_name] = Z_new
 
-
-                print(
-                    f"[Scheduler-{model_name}][{scheduler_type}] Z_old={Z_old:.4f}, "
-                    f"avg_slo_pen_actual={avg_pen_actual:.4f}, violations={slo_violations}, "
-                    f"Z_new={Z_new:.4f} (max={Z_MAX})"
-                )
+                if DEBUG:
+                    print(
+                        f"[Scheduler-{model_name}][{scheduler_type}] Z_old={Z_old:.4f}, "
+                        f"avg_slo_pen_actual={avg_pen_actual:.4f}, violations={slo_violations}, "
+                        f"Z_new={Z_new:.4f} (max={Z_MAX})"
+                    )
 
 
 

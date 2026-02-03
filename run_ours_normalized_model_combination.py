@@ -305,13 +305,13 @@ def main():
     parser.add_argument(
         "--run-seconds",
         type=int,
-        default=30,
+        default=20,
         help="Duration of each run in seconds.",
     )
     parser.add_argument(
         "--slo-ms",
         type=float,
-        default=20.0,
+        default=50.0,
         help="SLO threshold in milliseconds.",
     )
     parser.add_argument(
@@ -515,3 +515,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    subprocess.run(["python", "plot_model_combination_comparison.py"], check=True)

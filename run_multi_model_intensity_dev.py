@@ -289,7 +289,7 @@ def main():
     parser.add_argument(
         "--lambdas",
         type=str,
-        default="10,20,30,40,80,120,160,200,210,220,230,240",
+        default="20,40,60,80,100,120,140,160,180,200,220,240",
         # default="5,10,15,20,30,40,80,120,160,200,240,280,320,360",
         # default="5,10,15,20,25,30",
         help="Comma-separated list of Poisson arrival rates per model (req/s).",
@@ -355,7 +355,8 @@ def main():
 
     schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
     # schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
-    schedulers = ["ours_normalized"]
+    # schedulers = ["early_exit","ours_normalized"]
+    # schedulers = ["ours_normalized"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 
