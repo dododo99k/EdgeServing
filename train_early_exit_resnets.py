@@ -202,6 +202,100 @@ def evaluate(
     return exit_accuracies
 
 
+def train_backbone_only(
+    model: EarlyExitResNet,
+    trainloader: DataLoader,
+    criterion: nn.Module,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+) -> float:
+    """
+    Train only the backbone and final classifier (no early exits).
+    """
+    model.train()
+
+    total_loss = 0.0
+    total_samples = 0
+
+    for batch_idx, (inputs, targets) in enumerate(trainloader):
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        optimizer.zero_grad()
+
+        # Only use final exit
+        outputs = model(inputs, exit_id="final")
+        loss = criterion(outputs, targets)
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * inputs.size(0)
+        total_samples += inputs.size(0)
+
+        if (batch_idx + 1) % 100 == 0:
+            print(f"  Batch [{batch_idx+1}/{len(trainloader)}], Loss: {loss.item():.4f}")
+
+    return total_loss / total_samples
+
+
+def train_early_exits_only(
+    model: EarlyExitResNet,
+    trainloader: DataLoader,
+    criterion: nn.Module,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+    exit_points: Tuple[str, ...],
+    epoch: int,
+) -> Dict[str, float]:
+    """
+    Train only early exit heads with frozen backbone.
+    """
+    model.train()
+
+    # Freeze backbone
+    for param in model.base.parameters():
+        param.requires_grad = False
+
+    # Unfreeze exit heads
+    for param in model.exit_heads.parameters():
+        param.requires_grad = True
+
+    exit_losses = {exit_id: 0.0 for exit_id in exit_points if exit_id != "final"}
+    total_samples = 0
+
+    for batch_idx, (inputs, targets) in enumerate(trainloader):
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        optimizer.zero_grad()
+
+        # Forward through all exits
+        outputs = model(inputs, return_all=True)
+
+        # Compute loss only for early exits (not final)
+        total_loss = 0.0
+        for exit_id in exit_points:
+            if exit_id != "final" and exit_id in outputs:
+                loss = criterion(outputs[exit_id], targets)
+                exit_losses[exit_id] += loss.item() * inputs.size(0)
+                total_loss += loss
+
+        if total_loss > 0:
+            total_loss.backward()
+            optimizer.step()
+
+        total_samples += inputs.size(0)
+
+        if (batch_idx + 1) % 100 == 0:
+            print(f"  Batch [{batch_idx+1}/{len(trainloader)}], Total Loss: {total_loss.item():.4f}")
+
+    # Average losses
+    for exit_id in exit_losses:
+        exit_losses[exit_id] /= total_samples
+
+    return exit_losses
+
+
 def train_model(
     model_name: str,
     model: EarlyExitResNet,
@@ -214,56 +308,74 @@ def train_model(
     momentum: float = 0.9,
     weight_decay: float = 5e-4,
     save_dir: str = "./checkpoints",
+    stage1_epochs: int = None,
 ):
     """
-    Train a single EarlyExitResNet model.
+    Train a single EarlyExitResNet model in two stages:
+    Stage 1: Train backbone + final classifier only
+    Stage 2: Freeze backbone, train early exit heads only
     """
     print(f"\n{'='*60}")
-    print(f"Training {model_name}")
+    print(f"Training {model_name} (Two-Stage Training)")
     print(f"{'='*60}")
 
     os.makedirs(save_dir, exist_ok=True)
 
+    # If stage1_epochs not specified, use 60% of total epochs for stage 1
+    if stage1_epochs is None:
+        stage1_epochs = int(epochs * 0.6)
+    stage2_epochs = epochs - stage1_epochs
+
+    print(f"\nStage 1 (Backbone + Final): {stage1_epochs} epochs")
+    print(f"Stage 2 (Early Exits): {stage2_epochs} epochs\n")
+
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(
+
+    # =========================
+    # STAGE 1: Train backbone + final classifier
+    # =========================
+    print(f"\n{'='*60}")
+    print(f"STAGE 1: Training Backbone + Final Classifier")
+    print(f"{'='*60}")
+
+    optimizer_stage1 = optim.SGD(
         model.parameters(),
         lr=lr,
         momentum=momentum,
         weight_decay=weight_decay
     )
 
-    # Learning rate scheduler: decay at 50% and 75% of total epochs
-    milestones = [int(epochs * 0.5), int(epochs * 0.75)]
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1)
+    milestones_stage1 = [int(stage1_epochs * 0.5), int(stage1_epochs * 0.75)]
+    scheduler_stage1 = optim.lr_scheduler.MultiStepLR(optimizer_stage1, milestones=milestones_stage1, gamma=0.1)
 
     # Track training history
     history = {
-        "train_losses": [],
-        "test_accuracies": [],
+        "stage1_train_losses": [],
+        "stage1_test_accuracies": [],
+        "stage2_train_losses": [],
+        "stage2_test_accuracies": [],
         "best_accuracies": {exit_id: 0.0 for exit_id in exit_points},
     }
 
     best_final_acc = 0.0
 
-    for epoch in range(epochs):
+    # Stage 1 Training Loop
+    for epoch in range(stage1_epochs):
         epoch_start = time.time()
-        print(f"\nEpoch {epoch+1}/{epochs}, LR: {scheduler.get_last_lr()[0]:.6f}")
+        print(f"\n[Stage 1] Epoch {epoch+1}/{stage1_epochs}, LR: {scheduler_stage1.get_last_lr()[0]:.6f}")
 
-        # Train
-        train_losses = train_epoch(
-            model, trainloader, criterion, optimizer, device, exit_points, epoch
+        # Train backbone + final only
+        train_loss = train_backbone_only(
+            model, trainloader, criterion, optimizer_stage1, device, epoch
         )
 
-        # Evaluate
+        # Evaluate all exits
         test_accs = evaluate(model, testloader, device, exit_points)
-
         epoch_time = time.time() - epoch_start
 
         # Print results
-        print(f"\nEpoch {epoch+1} completed in {epoch_time:.2f}s")
-        print("Train Losses:")
-        for exit_id, loss in train_losses.items():
-            print(f"  {exit_id:8s}: {loss:.4f}")
+        print(f"\n[Stage 1] Epoch {epoch+1} completed in {epoch_time:.2f}s")
+        print(f"Train Loss (final): {train_loss:.4f}")
         print("Test Accuracies:")
         for exit_id, acc in test_accs.items():
             print(f"  {exit_id:8s}: {acc:.2f}%")
@@ -271,31 +383,91 @@ def train_model(
                 history["best_accuracies"][exit_id] = acc
 
         # Save history
-        history["train_losses"].append(train_losses)
-        history["test_accuracies"].append(test_accs)
+        history["stage1_train_losses"].append({"final": train_loss})
+        history["stage1_test_accuracies"].append(test_accs)
 
         # Save best model based on final exit accuracy
         if test_accs["final"] > best_final_acc:
             best_final_acc = test_accs["final"]
-            checkpoint_path = os.path.join(save_dir, f"{model_name}_best.pth")
+            checkpoint_path = os.path.join(save_dir, f"{model_name}_stage1_best.pth")
             torch.save({
+                'stage': 1,
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_state_dict': optimizer_stage1.state_dict(),
                 'test_accuracies': test_accs,
-                'best_accuracies': history["best_accuracies"],
             }, checkpoint_path)
-            print(f"Saved best checkpoint to {checkpoint_path}")
+            print(f"Saved Stage 1 best checkpoint to {checkpoint_path}")
 
-        scheduler.step()
+        scheduler_stage1.step()
+
+    print(f"\n{'='*60}")
+    print(f"Stage 1 Complete - Best Final Accuracy: {best_final_acc:.2f}%")
+    print(f"{'='*60}")
+
+    # =========================
+    # STAGE 2: Train early exit heads only
+    # =========================
+    if stage2_epochs > 0 and len([e for e in exit_points if e != "final"]) > 0:
+        print(f"\n{'='*60}")
+        print(f"STAGE 2: Training Early Exit Heads (Backbone Frozen)")
+        print(f"{'='*60}")
+
+        # Only optimize early exit head parameters
+        optimizer_stage2 = optim.SGD(
+            [p for p in model.exit_heads.parameters() if p.requires_grad],
+            lr=lr * 0.1,  # Use lower learning rate for stage 2
+            momentum=momentum,
+            weight_decay=weight_decay
+        )
+
+        milestones_stage2 = [int(stage2_epochs * 0.5), int(stage2_epochs * 0.75)]
+        scheduler_stage2 = optim.lr_scheduler.MultiStepLR(optimizer_stage2, milestones=milestones_stage2, gamma=0.1)
+
+        # Stage 2 Training Loop
+        for epoch in range(stage2_epochs):
+            epoch_start = time.time()
+            print(f"\n[Stage 2] Epoch {epoch+1}/{stage2_epochs}, LR: {scheduler_stage2.get_last_lr()[0]:.6f}")
+
+            # Train early exits only
+            train_losses = train_early_exits_only(
+                model, trainloader, criterion, optimizer_stage2, device, exit_points, epoch
+            )
+
+            # Evaluate all exits
+            test_accs = evaluate(model, testloader, device, exit_points)
+            epoch_time = time.time() - epoch_start
+
+            # Print results
+            print(f"\n[Stage 2] Epoch {epoch+1} completed in {epoch_time:.2f}s")
+            print("Train Losses (early exits):")
+            for exit_id, loss in train_losses.items():
+                print(f"  {exit_id:8s}: {loss:.4f}")
+            print("Test Accuracies:")
+            for exit_id, acc in test_accs.items():
+                print(f"  {exit_id:8s}: {acc:.2f}%")
+                if acc > history["best_accuracies"][exit_id]:
+                    history["best_accuracies"][exit_id] = acc
+
+            # Save history
+            history["stage2_train_losses"].append(train_losses)
+            history["stage2_test_accuracies"].append(test_accs)
+
+            scheduler_stage2.step()
+
+        print(f"\n{'='*60}")
+        print(f"Stage 2 Complete")
+        print(f"{'='*60}")
+
+    # Unfreeze all parameters for final checkpoint
+    for param in model.parameters():
+        param.requires_grad = True
 
     # Save final checkpoint
     final_checkpoint_path = os.path.join(save_dir, f"{model_name}_final.pth")
     torch.save({
-        'epoch': epochs,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'test_accuracies': test_accs,
+        'best_accuracies': history["best_accuracies"],
         'history': history,
     }, final_checkpoint_path)
     print(f"\nSaved final checkpoint to {final_checkpoint_path}")
@@ -320,10 +492,17 @@ def save_results_summary(
     # Convert to JSON-serializable format
     json_results = {}
     for model_name, history in results.items():
-        json_results[model_name] = {
+        result_entry = {
             "best_accuracies": history["best_accuracies"],
-            "final_accuracies": history["test_accuracies"][-1],
         }
+
+        # Get final accuracies from last epoch of stage 2 if available, otherwise stage 1
+        if history["stage2_test_accuracies"]:
+            result_entry["final_accuracies"] = history["stage2_test_accuracies"][-1]
+        elif history["stage1_test_accuracies"]:
+            result_entry["final_accuracies"] = history["stage1_test_accuracies"][-1]
+
+        json_results[model_name] = result_entry
 
     with open(save_path, 'w') as f:
         json.dump(json_results, f, indent=2)
@@ -345,6 +524,8 @@ def main():
                         help='which models to train')
     parser.add_argument('--use-pretrained', action='store_true',
                         help='use ImageNet pretrained weights as initialization')
+    parser.add_argument('--stage1-epochs', type=int, default=None,
+                        help='epochs for stage 1 (backbone training). If None, uses 60%% of total epochs')
 
     args = parser.parse_args()
 
@@ -380,8 +561,13 @@ def main():
         models['ResNet152'] = m152
 
     # Training parameters
+    stage1_epochs = args.stage1_epochs if args.stage1_epochs is not None else int(args.epochs * 0.6)
+    stage2_epochs = args.epochs - stage1_epochs
+
     print(f"\nTraining Configuration:")
-    print(f"  Epochs: {args.epochs}")
+    print(f"  Total Epochs: {args.epochs}")
+    print(f"  Stage 1 Epochs (Backbone): {stage1_epochs}")
+    print(f"  Stage 2 Epochs (Early Exits): {stage2_epochs}")
     print(f"  Batch Size: {args.batch_size}")
     print(f"  Learning Rate: {args.lr}")
     print(f"  Momentum: {args.momentum}")
@@ -406,6 +592,7 @@ def main():
             momentum=args.momentum,
             weight_decay=args.weight_decay,
             save_dir=args.save_dir,
+            stage1_epochs=stage1_epochs,
         )
         all_results[model_name] = history
 
