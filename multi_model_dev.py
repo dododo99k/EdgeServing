@@ -141,8 +141,8 @@ ACCURACY_PENALTIES = {
     "ResNet101": {"layer1": -0.1*r101_coeff, "layer2": -3.3*r101_coeff, "layer3": -6.6*r101_coeff, "final": -6.8*r101_coeff},
     "ResNet152": {"layer1": -0.2*r152_coeff, "layer2": -6*r152_coeff, "layer3": -9.9*r152_coeff, "final": -10*r152_coeff},
 }
-
-ACCURACY_MODEL = {
+# 1 stage training for all exit points including final
+ACCURACY_1_STAGE = {
     "ResNet50":  {"layer1": 0.5897, "layer2": 0.7549, "layer3": 0.8071, "final": 0.8061},
     "ResNet101": {"layer1": 0.599, "layer2": 0.7497, "layer3": 0.8135, "final": 0.8134},
     "ResNet152": {"layer1": 0.5836, "layer2": 0.7734, "layer3": 0.8091, "final": 0.8073},
