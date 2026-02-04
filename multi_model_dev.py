@@ -141,6 +141,12 @@ ACCURACY_PENALTIES = {
     "ResNet101": {"layer1": -0.1*r101_coeff, "layer2": -3.3*r101_coeff, "layer3": -6.6*r101_coeff, "final": -6.8*r101_coeff},
     "ResNet152": {"layer1": -0.2*r152_coeff, "layer2": -6*r152_coeff, "layer3": -9.9*r152_coeff, "final": -10*r152_coeff},
 }
+
+ACCURACY_MODEL = {
+    "ResNet50":  {"layer1": 0.8668, "layer2": 0.9356, "layer3": 0.9511, "final": 0.9506},
+    "ResNet101": {"layer1": 0.8676, "layer2": 0.9344, "layer3": 0.9514, "final": 0.9506},
+    "ResNet152": {"layer1": 0.868, "layer2": 0.939, "layer3": 0.9489, "final": 0.9492},
+}
 # ========================
 # Global task id generator
 # ========================
@@ -1220,11 +1226,11 @@ def algorithm_ours_normalized(
                 # All terms normalized by inference time
                 # part1 = Qm * B / temp_time
                 # part1 = sum(waits_ms[:B]) / temp_time
+                # part1 = Qm * B / temp_time * acc_pen
                 part1 = Qm / 10 * sum(waits_ms[:B]) / temp_time
-                # part1 = Qm * B / infer_ms
-                # part2 = - W_SLO_N * Zm  * avg_slo_pen / temp_time
                 part2 = - W_SLO_N * Zm * slo_violation_number + Zm * B * SLO_PENALTY_TARGET_N
                 part3 = - W_ACC_N * B * acc_pen
+                
                 score = part1 + part2 + part3
                 if DEBUG:
                     print(f"[DEBUG] infer={infer_ms:.4f} Action: (B={B}, Exit={e}) Violation:{slo_violation_number} => Score Parts: {part1:.4f}, {part2:.4f}, {part3:.4f} => Total Score: {score:.4f}")

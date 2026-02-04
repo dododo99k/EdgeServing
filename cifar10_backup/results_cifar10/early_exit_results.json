@@ -1,0 +1,44 @@
+{
+  "ResNet50": {
+    "best_accuracies": {
+      "layer1": 86.93,
+      "layer2": 93.63,
+      "layer3": 95.32,
+      "final": 95.37
+    },
+    "final_accuracies": {
+      "layer1": 86.68,
+      "layer2": 93.56,
+      "layer3": 95.11,
+      "final": 95.06
+    }
+  },
+  "ResNet101": {
+    "best_accuracies": {
+      "layer1": 87.09,
+      "layer2": 93.66,
+      "layer3": 95.39,
+      "final": 95.36
+    },
+    "final_accuracies": {
+      "layer1": 86.76,
+      "layer2": 93.44,
+      "layer3": 95.14,
+      "final": 95.06
+    }
+  },
+  "ResNet152": {
+    "best_accuracies": {
+      "layer1": 87.0,
+      "layer2": 94.01,
+      "layer3": 94.97,
+      "final": 94.96
+    },
+    "final_accuracies": {
+      "layer1": 86.8,
+      "layer2": 93.9,
+      "layer3": 94.89,
+      "final": 94.92
+    }
+  }
+}

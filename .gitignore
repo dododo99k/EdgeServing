@@ -19,6 +19,11 @@ build/
 htmlcov/
 *.log
 
+# torch
+*.pt
+*.pth
+.data/
+
 # Virtual environments
 venv/
 env/
@@ -35,3 +40,5 @@ ENV/
 # Environment variables
 .env
 .env.local
+
+.DS_Store
