@@ -22,7 +22,11 @@ htmlcov/
 # torch
 *.pt
 *.pth
-.data/
+
+# datasets & archives
+data/
+*.tar.gz
+*.zip
 
 # Virtual environments
 venv/
