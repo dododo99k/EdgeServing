@@ -97,6 +97,7 @@ W_SLO_N = float(os.getenv("W_SLO_N", "1"))
 W_ACC_N = float(os.getenv("W_ACC_N", "0.8"))
 # W_ACC_N = float(os.getenv("W_ACC_N", "0"))
 # W_ACC_N = float(os.getenv("W_ACC_N", "0"))
+
 # Penalties designed based on inference time analysis to compensate for time normalization
 # Score formula: (Q*B - W_SLO_N*Z*B*slo_pen - W_ACC_N*B*acc_pen) / sqrt(infer_ms)
 # Using sqrt normalization to reduce speed advantage of early exits (3x -> 1.73x)
@@ -146,6 +147,11 @@ ACCURACY_1_STAGE = {
     "ResNet50":  {"layer1": 0.5897, "layer2": 0.7549, "layer3": 0.8071, "final": 0.8061},
     "ResNet101": {"layer1": 0.599, "layer2": 0.7497, "layer3": 0.8135, "final": 0.8134},
     "ResNet152": {"layer1": 0.5836, "layer2": 0.7734, "layer3": 0.8091, "final": 0.8073},
+}
+ACCURACY_2_STAGE = {
+    "ResNet50":  {"layer1": 0.0764, "layer2": 0.1213, "layer3": 0.3082, "final": 0.7435},
+    "ResNet101": {"layer1": 0.0739, "layer2": 0.1452, "layer3": 0.5433, "final": 0.7794},
+    "ResNet152": {"layer1": 0.0729, "layer2": 0.1724, "layer3": 0.4744, "final": 0.7796},
 }
 # ========================
 # Global task id generator
