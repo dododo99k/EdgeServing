@@ -143,9 +143,9 @@ ACCURACY_PENALTIES = {
 }
 
 ACCURACY_MODEL = {
-    "ResNet50":  {"layer1": 0.8668, "layer2": 0.9356, "layer3": 0.9511, "final": 0.9506},
-    "ResNet101": {"layer1": 0.8676, "layer2": 0.9344, "layer3": 0.9514, "final": 0.9506},
-    "ResNet152": {"layer1": 0.868, "layer2": 0.939, "layer3": 0.9489, "final": 0.9492},
+    "ResNet50":  {"layer1": 0.5897, "layer2": 0.7549, "layer3": 0.8071, "final": 0.8061},
+    "ResNet101": {"layer1": 0.599, "layer2": 0.7497, "layer3": 0.8135, "final": 0.8134},
+    "ResNet152": {"layer1": 0.5836, "layer2": 0.7734, "layer3": 0.8091, "final": 0.8073},
 }
 # ========================
 # Global task id generator
