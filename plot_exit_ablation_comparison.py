@@ -1,13 +1,13 @@
 """
 plot_exit_ablation_comparison.py
 
-Compare ours_normalized performance with different exit point configurations.
+Compare early_exit_lowest_interference performance with different exit point configurations.
 
 Reads from:
   - logs_layer*_final/ (exit ablation experiments)
   - logs_all_exits_3r50_2r101_1r152/ (baseline with all exits)
 
-Generates comparison plots for p95 latency, drop ratio, and average exit depth.
+Generates comparison plots for p95 latency, Violate Ratio, and average exit depth.
 """
 
 import os
@@ -17,7 +17,7 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 
-from run_ours_normalized_exit_ablation import compute_metrics_from_diag
+from run_exit_ablation import compute_metrics_from_diag
 
 
 def _set_x_ticks_40(ax, lambda_list):
@@ -37,7 +37,7 @@ def load_exit_ablation_results(logs_dir="logs_exit_point_ablation"):
     """
     Load all exit ablation results from logs_exit_point_ablation/ directory.
 
-    Structure: logs_exit_point_ablation/lam152_*/multi_model_diag_ours_normalized_exits_*.pkl
+    Structure: logs_exit_point_ablation/lam152_*/multi_model_diag_early_exit_lowest_interference_exits_*.pkl
 
     Returns
     -------
@@ -68,7 +68,7 @@ def load_exit_ablation_results(logs_dir="logs_exit_point_ablation"):
 
         for pkl_file in pkl_files:
             # Extract exit config from filename
-            # e.g., "multi_model_diag_ours_normalized_exits_layer1_final.pkl" -> "layer1_final"
+            # e.g., "multi_model_diag_early_exit_lowest_interference_exits_layer1_final.pkl" -> "layer1_final"
             fname = os.path.basename(pkl_file)
             exit_match = re.search(r"_exits_(.+)\.pkl$", fname)
             if not exit_match:
@@ -91,7 +91,7 @@ def load_exit_ablation_results(logs_dir="logs_exit_point_ablation"):
     return results
 
 
-def load_baseline_results(logs_dir="logs_all_exits_3r50_2r101_1r152", scheduler="ours_normalized"):
+def load_baseline_results(logs_dir="logs_all_exits_3r50_2r101_1r152", scheduler="early_exit_lowest_interference"):
     """
     Load baseline results (all exits) from standard logs directory.
     
@@ -161,7 +161,7 @@ def plot_comparison(results_dict, lambda_list, out_dir="figures_exit_point_ablat
     for config in configs:
         lambdas = []
         p95_vals = []
-        drop_vals = []
+        violate_ratio = []
         avg_exit_vals = []
         
         for lam in lambda_list:
@@ -169,13 +169,13 @@ def plot_comparison(results_dict, lambda_list, out_dir="figures_exit_point_ablat
                 m = results_dict[config][lam]
                 lambdas.append(lam)
                 p95_vals.append(m["p95_ms"])
-                drop_vals.append(m["drop_ratio"])
+                violate_ratio.append(m["violate_ratio"])
                 avg_exit_vals.append(m["avg_exit_all"])
         
         data[config] = {
             "lambdas": np.array(lambdas),
             "p95": np.array(p95_vals),
-            "drop": np.array(drop_vals),
+            "violate": np.array(violate_ratio),
             "avg_exit": np.array(avg_exit_vals),
         }
     
@@ -218,11 +218,11 @@ def plot_comparison(results_dict, lambda_list, out_dir="figures_exit_point_ablat
     print(f"P95 latency figure saved to: {out_path1}")
     plt.close(fig1)
     
-    # Plot 2: Drop Ratio
+    # Plot 2: Violate Ratio
     fig2, ax2 = plt.subplots(figsize=(12, 5))
-    ax2.set_title("Impact of Exit Point Configuration on Drop Ratio", fontsize=18, fontweight='bold')
+    ax2.set_title("Impact of Exit Point Configuration on Violate Ratio", fontsize=18, fontweight='bold')
     ax2.set_xlabel("Traffic Intensity λ (req/s)", fontsize=16)
-    ax2.set_ylabel("Drop ratio", fontsize=16)
+    ax2.set_ylabel("Violate Ratio", fontsize=16)
     ax2.grid(True, linestyle="--", alpha=0.5)
     
     for config in configs_sorted:
@@ -233,7 +233,7 @@ def plot_comparison(results_dict, lambda_list, out_dir="figures_exit_point_ablat
             label = "all exits"
         ax2.plot(
             data[config]["lambdas"],
-            data[config]["drop"],
+            data[config]["violate"],
             marker="s",
             linestyle="-",
             label=label,
@@ -241,12 +241,12 @@ def plot_comparison(results_dict, lambda_list, out_dir="figures_exit_point_ablat
         )
     
     ax2.legend(loc="best", fontsize=14)
-    ax2.set_ylim(0.0, 0.003)
+    ax2.set_ylim(0.0, 0.1)
     _set_x_ticks_40(ax2, lambda_list)
     fig2.tight_layout()
-    out_path2 = os.path.join(out_dir, "exit_ablation_drop_ratio_compare.png")
+    out_path2 = os.path.join(out_dir, "exit_ablation_violate_ratio_compare.png")
     plt.savefig(out_path2, dpi=300)
-    print(f"Drop ratio figure saved to: {out_path2}")
+    print(f"Violate Ratio figure saved to: {out_path2}")
     plt.close(fig2)
     
     # Plot 3: Average Exit Depth
@@ -291,7 +291,7 @@ def main():
     
     # Load baseline results (all exits)
     print("\nLoading baseline results (all exits)...")
-    baseline_results = load_baseline_results("logs_all_exits_3r50_2r101_1r152", "ours_normalized")
+    baseline_results = load_baseline_results("logs_all_exits_3r50_2r101_1r152", "early_exit_lowest_interference")
     
     # Combine results
     all_results = ablation_results.copy()

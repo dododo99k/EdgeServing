@@ -353,10 +353,12 @@ def main():
     profile_dir = args.profile_dir
     logs_dir = args.logs_dir
 
-    schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony", "ours_normalized"]
+    schedulers = ["early_exit","early_exit_lowest_interference", "all_early", "all_final", "all_final_round_robin", "symphony"]
+    
     # schedulers = ["early_exit", "all_early", "all_final", "all_final_round_robin", "symphony"]
     # schedulers = ["early_exit","ours_normalized"]
-    # schedulers = ["ours_normalized"]
+    schedulers = ["early_exit_lowest_interference"]
+    # schedulers = ["early_exit"]
     # results[scheduler][lam] = metrics
     results = {sch: {} for sch in schedulers}
 

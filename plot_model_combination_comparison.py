@@ -6,7 +6,7 @@ Generate comparison plots for model combination study.
 This script loads results from logs_diff_model_combination/ directory and creates
 comparison plots showing how different model combinations affect:
   - P95 latency vs traffic intensity
-  - Drop ratio vs traffic intensity
+  - Violate ratio vs traffic intensity
   - Average exit depth vs traffic intensity
 """
 
@@ -101,7 +101,7 @@ def plot_comparison(results, output_dir="figures_diff_model_combination"):
             temp_data.append({
                 'lam152': lam152,
                 'p95': metrics["p95_ms"],
-                'drop': metrics["drop_ratio"],
+                'violate': metrics["violate_ratio"],
                 'avg_exit': metrics["avg_exit_all"]
             })
         
@@ -111,13 +111,13 @@ def plot_comparison(results, output_dir="figures_diff_model_combination"):
         # Extract sorted lists
         lambdas = [d['lam152'] for d in temp_data]
         p95_list = [d['p95'] for d in temp_data]
-        drop_list = [d['drop'] for d in temp_data]
+        violate_list = [d['violate'] for d in temp_data]
         avg_exit_list = [d['avg_exit'] for d in temp_data]
         
         data[combo_label] = {
             "lambdas": lambdas,
             "p95": p95_list,
-            "drop": drop_list,
+            "violate": violate_list,
             "avg_exit": avg_exit_list,
         }
         
@@ -198,23 +198,23 @@ def plot_comparison(results, output_dir="figures_diff_model_combination"):
     plt.savefig(os.path.join(output_dir, "model_combination_p95_latency_compare.png"), dpi=300)
     plt.close()
     
-    # Plot 2: Drop Ratio
+    # Plot 2: Violate Ratio
     plt.figure(figsize=(12, 6))
     for combo in sorted_combos:
         label = combo_names[combo]
-        plt.plot(data[combo]["lambdas"], data[combo]["drop"],
+        plt.plot(data[combo]["lambdas"], data[combo]["violate"],
                 marker='s', label=label, linestyle='-',
                 linewidth=2, alpha=1.0, markersize=6)
 
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
-    plt.ylabel("Drop Ratio", fontsize=16)
-    plt.title("Impact of Model Combination on Drop Ratio", fontsize=18, fontweight='bold')
+    plt.ylabel("Violate Ratio", fontsize=16)
+    plt.title("Impact of Model Combination on Violate Ratio", fontsize=18, fontweight='bold')
     plt.xticks(lambda_ticks)
     plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "model_combination_drop_ratio_compare.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "model_combination_violate_ratio_compare.png"), dpi=300)
     plt.close()
     
     # Plot 3: Average Exit Depth

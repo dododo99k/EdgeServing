@@ -6,7 +6,7 @@ Generate comparison plots for SLO ablation study.
 This script loads results from logs_slo_ablation/ directory and creates
 comparison plots showing how different SLO thresholds affect:
   - P95 latency vs traffic intensity
-  - Drop ratio vs traffic intensity
+  - Violate ratio vs traffic intensity
   - Average exit depth vs traffic intensity
 """
 
@@ -108,7 +108,7 @@ def load_baseline_results(base_dir="logs_baseline"):
             
             # Compute metrics
             total_time_by_model_exit = payload["total_time_by_model_exit"]
-            dropped_wait_times_by_model = payload["dropped_wait_times_by_model"]
+            slo_violations_by_model = payload["slo_violations_by_model"]
             
             # Flatten total_times
             all_times = []
@@ -124,9 +124,9 @@ def load_baseline_results(base_dir="logs_baseline"):
                 p95_ms = float(np.percentile(all_times * 1000.0, 95))
             
             num_completed = int(all_times.size)
-            num_dropped = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
-            total = num_completed + num_dropped
-            drop_ratio = float(num_dropped) / total if total > 0 else 0.0
+            num_violated = sum(v["violations"] for v in slo_violations_by_model.values())
+            total = num_completed + num_violated
+            violate_ratio = float(num_violated) / total if total > 0 else 0.0
             
             # Average exit depth - use global absolute depth for fair comparison
             exit_points = payload.get("exit_points", ["layer1", "layer2", "layer3", "final"])
@@ -146,9 +146,9 @@ def load_baseline_results(base_dir="logs_baseline"):
             
             results[lam] = {
                 "p95_ms": p95_ms,
-                "drop_ratio": drop_ratio,
+                "violate_ratio": violate_ratio,
                 "num_completed": num_completed,
-                "num_dropped": num_dropped,
+                "num_violated": num_violated,
                 "avg_exit_all": avg_exit_all,
             }
             
@@ -182,20 +182,20 @@ def plot_comparison(results, output_dir="figures_slo_ablation"):
     for slo_ms in slo_values:
         lambdas = []
         p95_list = []
-        drop_list = []
+        violate_list = []
         avg_exit_list = []
         
         for lam in sorted(results[slo_ms].keys()):
             metrics = results[slo_ms][lam]
             lambdas.append(lam)
             p95_list.append(metrics["p95_ms"])
-            drop_list.append(metrics["drop_ratio"])
+            violate_list.append(metrics["violate_ratio"])
             avg_exit_list.append(metrics["avg_exit_all"])
         
         data[slo_ms] = {
             "lambdas": lambdas,
             "p95": p95_list,
-            "drop": drop_list,
+            "violate": violate_list,
             "avg_exit": avg_exit_list,
         }
 
@@ -235,31 +235,31 @@ def plot_comparison(results, output_dir="figures_slo_ablation"):
     plt.title("Impact of SLO Threshold on P95 Latency", fontsize=18, fontweight='bold')
     plt.xticks(lambda_ticks)
     plt.xlim(xlim_min, xlim_max)
-    plt.ylim(0, 20)
+    plt.ylim(0, 70)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "slo_ablation_p95_latency_compare.png"), dpi=300)
     plt.close()
     
-    # Plot 2: Drop Ratio
+    # Plot 2: Violate Ratio
     plt.figure(figsize=(12, 5))
     numeric_keys = sorted([k for k in data.keys() if isinstance(k, (int, float))])
     for key in numeric_keys:
         label = f"SLO={key}ms"
-        plt.plot(data[key]["lambdas"], data[key]["drop"], 
+        plt.plot(data[key]["lambdas"], data[key]["violate"], 
                 marker='s', label=label, linestyle='-',
                 linewidth=2, alpha=1.0, markersize=6)
     
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
-    plt.ylabel("Drop Ratio", fontsize=16)
-    plt.title("Impact of SLO Threshold on Drop Ratio", fontsize=18, fontweight='bold')
+    plt.ylabel("Violate Ratio", fontsize=16)
+    plt.title("Impact of SLO Threshold on Violate Ratio", fontsize=18, fontweight='bold')
     plt.xticks(lambda_ticks)
     plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "slo_ablation_drop_ratio_compare.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "slo_ablation_violate_ratio_compare.png"), dpi=300)
     plt.close()
     
     # Plot 3: Average Exit Depth

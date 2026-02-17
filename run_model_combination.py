@@ -1,7 +1,7 @@
 """
-run_ours_normalized_model_combination.py
+run_early_exit_lowest_interference_model_combination.py
 
-Model combination study for algorithm_ours_normalized.
+Model combination study for algorithm_early_exit_lowest_interference.
 
 This script tests the performance of our normalized scheduler with different
 model instance combinations:
@@ -12,8 +12,8 @@ model instance combinations:
 
 For each combination, we:
   - sweep lambda_list (traffic intensities)
-  - run the serving script with scheduler="ours_normalized"
-  - collect metrics (p95 latency, drop ratio, avg exit depth)
+  - run the serving script with scheduler="early_exit_lowest_interference"
+  - collect metrics (p95 latency, violate ratio, avg exit depth)
   - save results and generate comparison plots
 """
 
@@ -100,7 +100,7 @@ def run_one_experiment(
         "python",
         SERVING_SCRIPT,
         "--scheduler",
-        "ours_normalized",
+        "early_exit_lowest_interference",
         "--num-r50", str(num_r50),
         "--num-r101", str(num_r101),
         "--num-r152", str(num_r152),
@@ -115,7 +115,7 @@ def run_one_experiment(
         "--exit-points", exit_str,
     ]
 
-    print(f"\n=== Running ours_normalized @ λ152={lam152}, combo={combo_label} ===")
+    print(f"\n=== Running early_exit_lowest_interference @ λ152={lam152}, combo={combo_label} ===")
     print(f"Model combination: {num_r50}×R50, {num_r101}×R101, {num_r152}×R152")
     print(f"Lambda distribution: R50={lam50:.1f}, R101={lam101:.1f}, R152={lam152:.1f} req/s")
     print("Command:", " ".join(cmd))
@@ -169,7 +169,7 @@ def run_one_experiment(
 
     # Find the diagnostic file
     diag_dir = os.path.join(logs_dir, f"lam152_{lam152:g}")
-    base_diag_name = "multi_model_diag_ours_normalized.pkl"
+    base_diag_name = "multi_model_diag_early_exit_lowest_interference.pkl"
     base_diag_path = os.path.join(diag_dir, base_diag_name)
 
     if not os.path.exists(base_diag_path):
@@ -181,7 +181,7 @@ def run_one_experiment(
     # Rename with combo config suffix
     diag_with_config = os.path.join(
         diag_dir,
-        f"multi_model_diag_ours_normalized_combo_{combo_label}.pkl",
+        f"multi_model_diag_early_exit_lowest_interference_combo_{combo_label}.pkl",
     )
     if os.path.exists(diag_with_config):
         os.remove(diag_with_config)
@@ -191,20 +191,32 @@ def run_one_experiment(
     return diag_with_config
 
 
+
 def compute_metrics_from_diag(diag_path: str):
     """
-    Given a diag pickle, compute:
-      - global p95 total latency (ms)
-      - global dropout ratio = dropped / (completed + dropped)
-      - counts of completed and dropped
-      - average early-exit depth (weighted by completed task count), per-model and global
-      - distribution of exits used
+    Given a diag pickle produced by the serving script, compute:
+
+      - global p95 total latency (ms) across all models and exits (non-warmup tasks),
+      - global SLO violation ratio = violated / (completed + violated),
+      - counts of completed and violated tasks (for reference),
+      - average early-exit depth (weighted by completed task count), per-model and global.
+
+    Notes
+    -----
+    * We treat each exit point as an ordinal depth in the order of `exit_points`
+      (e.g., layer1=1, layer2=2, layer3=3, final=4).
+    * If `exit_points` is missing from the payload, we infer an order from keys.
     """
     with open(diag_path, "rb") as f:
         payload = pickle.load(f)
 
     total_time_by_model_exit = payload["total_time_by_model_exit"]
-    dropped_wait_times_by_model = payload["dropped_wait_times_by_model"]
+
+    # Try to get SLO violations from new format, fallback to old num_violated format
+    slo_violations_by_model = payload.get("slo_violations_by_model", None)
+
+    num_violated = sum(v["violations"] for v in slo_violations_by_model.values())
+
 
     # Exit ordering (depth)
     exit_points = payload.get("exit_points")
@@ -232,48 +244,59 @@ def compute_metrics_from_diag(diag_path: str):
 
     if all_times.size == 0:
         p95_ms = float("nan")
+        p99_ms = float("nan")
     else:
         p95_ms = float(np.percentile(all_times * 1000.0, 95))
+        p99_ms = float(np.percentile(all_times * 1000.0, 99))
 
     num_completed = int(all_times.size)
-    num_dropped = int(sum(len(v) for v in dropped_wait_times_by_model.values()))
-    total = num_completed + num_dropped
-    drop_ratio = float(num_dropped) / total if total > 0 else 0.0
+    # num_violated is a subset of num_completed (completed tasks that exceeded SLO)
+    # So total should be num_completed, not num_completed + num_violated
+    violate_ratio = float(num_violated) / num_completed if num_completed > 0 else 0.0
 
-    # Average exit depth and exit distribution
-    exit_counts = {e: 0 for e in exit_points}
+    # Average exit depth per model and global (completed tasks only)
+    avg_exit_by_model = {}
+    counts_by_model_exit = {}
+
     total_all = 0
     sum_depth_all = 0.0
 
     for model_name, exit_dict in total_time_by_model_exit.items():
+        counts = {}
+        total_m = 0
+        sum_depth_m = 0.0
+
         for e in exit_points:
             times = exit_dict.get(e, [])
             c = int(len(times))
-            exit_counts[e] += c
-            total_all += c
-            sum_depth_all += float(depth_map[e]) * c
+            counts[e] = c
+            total_m += c
+            sum_depth_m += float(depth_map[e]) * c
+
+        counts_by_model_exit[model_name] = counts
+        avg_exit_by_model[model_name] = (sum_depth_m / total_m) if total_m > 0 else float("nan")
+
+        total_all += total_m
+        sum_depth_all += sum_depth_m
 
     avg_exit_all = (sum_depth_all / total_all) if total_all > 0 else float("nan")
 
-    # Convert exit counts to distribution
-    exit_dist = {e: (exit_counts[e] / total_all) if total_all > 0 else 0.0 for e in exit_points}
-
     return {
         "p95_ms": float(p95_ms),
-        "drop_ratio": float(drop_ratio),
+        "p99_ms": float(p99_ms),
+        "violate_ratio": float(violate_ratio),
         "num_completed": int(num_completed),
-        "num_dropped": int(num_dropped),
+        "num_violated": int(num_violated),
         "exit_points": list(exit_points),
         "max_exit_depth": int(max_depth),
         "avg_exit_all": float(avg_exit_all),
-        "exit_counts": exit_counts,
-        "exit_dist": exit_dist,
+        "avg_exit_by_model": {k: float(v) for k, v in avg_exit_by_model.items()},
+        "counts_by_model_exit": counts_by_model_exit,
     }
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Model combination study for ours_normalized"
+        description="Model combination study for early_exit_lowest_interference"
     )
     parser.add_argument(
         "--lambda-ratio",
@@ -404,7 +427,7 @@ def main():
         logs_dir = args.logs_dir
 
     print(f"\n{'='*60}")
-    print(f"Model Combination Study for ours_normalized")
+    print(f"Model Combination Study for early_exit_lowest_interference")
     print(f"{'='*60}")
     print(f"Number of combinations to test: {len(model_combinations)}")
     print(f"Combinations:")
@@ -454,9 +477,9 @@ def main():
                     f"[RESULT] combo={combo_label}, "
                     f"λ50={lam50:.1f}, λ101={lam101:.1f}, λ152={lam152:.1f}: "
                     f"p95={metrics['p95_ms']:.2f} ms, "
-                    f"drop_ratio={metrics['drop_ratio']:.3f}, "
+                    f"violate_ratio={metrics['violate_ratio']:.3f}, "
                     f"completed={metrics['num_completed']}, "
-                    f"dropped={metrics['num_dropped']}, "
+                    f"num_violated={metrics['num_violated']}, "
                     f"avg_exit_depth={metrics['avg_exit_all']:.2f}"
                 )
             except Exception as e:
@@ -499,14 +522,14 @@ def main():
         print(f"{'='*60}")
         print(f"Model Combination: {num_r50}×R50 + {num_r101}×R101 + {num_r152}×R152")
         print(f"{'-'*60}")
-        print(f"{'λ50':<8} {'λ101':<8} {'λ152':<8} {'P95(ms)':<10} {'Drop%':<10} {'AvgExit':<10} {'Completed':<12} {'Dropped':<10}")
+        print(f"{'λ50':<8} {'λ101':<8} {'λ152':<8} {'P95(ms)':<10} {'Violate%':<10} {'AvgExit':<10} {'Completed':<12} {'num_violated':<10}")
         print(f"{'-'*60}")
         for lambda_key in sorted(results.keys()):
             m = results[lambda_key]
             lam50, lam101, lam152 = lambda_key
             print(f"{lam50:<8.0f} {lam101:<8.0f} {lam152:<8.0f} {m['p95_ms']:<10.2f} "
-                    f"{m['drop_ratio']*100:<10.2f} {m['avg_exit_all']:<10.2f} "
-                    f"{m['num_completed']:<12} {m['num_dropped']:<10}")
+                    f"{m['violate_ratio']*100:<10.2f} {m['avg_exit_all']:<10.2f} "
+                    f"{m['num_completed']:<12} {m['num_violated']:<10}")
 
     print(f"\n{'='*60}")
     print(f"All {len(model_combinations)} combinations completed!")

@@ -6,7 +6,7 @@ Generate comparison plots for quantile study.
 This script loads results from logs_quantile_study/ directory and creates
 comparison plots showing how different quantile_key settings affect:
   - P95 latency vs traffic intensity
-  - Drop ratio vs traffic intensity
+  - Violate ratio vs traffic intensity
   - Average exit depth vs traffic intensity
 """
 
@@ -86,7 +86,7 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
             temp_data.append({
                 'lam152': lam152,
                 'p95': metrics["p95_ms"],
-                'drop': metrics["drop_ratio"],
+                'violate': metrics["violate_ratio"],
                 'avg_exit': metrics["avg_exit_all"]
             })
         
@@ -97,7 +97,7 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
         plot_data[quantile] = {
             "lambdas": [d['lam152'] for d in temp_data],
             "p95": [d['p95'] for d in temp_data],
-            "drop": [d['drop'] for d in temp_data],
+            "violate": [d['violate'] for d in temp_data],
             "avg_exit": [d['avg_exit'] for d in temp_data],
         }
     
@@ -138,25 +138,25 @@ def plot_comparison(data, output_dir="figures_quantile_study"):
     plt.close()
     print(f"Saved: {os.path.join(output_dir, 'quantile_study_p95_latency_compare.png')}")
     
-    # Plot 2: Drop Ratio
+    # Plot 2: Violate Ratio
     plt.figure(figsize=(12, 6))
     for quantile in sorted_quantiles:
         label = quantile.replace("_ms", "").replace("_", " ").title()
-        plt.plot(plot_data[quantile]["lambdas"], plot_data[quantile]["drop"], 
+        plt.plot(plot_data[quantile]["lambdas"], plot_data[quantile]["violate"], 
                 marker='s', label=label, linestyle='-',
                 linewidth=2, alpha=0.8, markersize=6)
     
     plt.xlabel("Traffic Intensity λ (req/s)", fontsize=16)
-    plt.ylabel("Drop Ratio", fontsize=16)
-    plt.title("Impact of Quantile Setting on Drop Ratio", fontsize=18, fontweight='bold')
+    plt.ylabel("Violate Ratio", fontsize=16)
+    plt.title("Impact of Quantile Setting on Violate Ratio", fontsize=18, fontweight='bold')
     plt.xticks(lambda_ticks)
     plt.xlim(xlim_min, xlim_max)
     plt.legend(loc='best', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "quantile_study_drop_ratio_compare.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, "quantile_study_violate_ratio_compare.png"), dpi=300)
     plt.close()
-    print(f"Saved: {os.path.join(output_dir, 'quantile_study_drop_ratio_compare.png')}")
+    print(f"Saved: {os.path.join(output_dir, 'quantile_study_violate_ratio_compare.png')}")
     
     # Plot 3: Average Exit Depth
     plt.figure(figsize=(12, 6))

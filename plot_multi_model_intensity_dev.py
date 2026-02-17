@@ -306,7 +306,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--schedulers",
         type=str,
-        default="early_exit,all_early,all_final,all_final_round_robin,symphony,ours_normalized",
+        default="early_exit,early_exit_lowest_interference,all_early,all_final,all_final_round_robin,symphony,ours_normalized",
         help="Comma-separated list of schedulers to plot.",
     )
     parser.add_argument(
