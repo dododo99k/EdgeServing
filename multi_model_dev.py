@@ -25,7 +25,7 @@ Schedulers (select via --scheduler):
       * baseline, always earliest exit, longest-queue-first
   - "symphony"
       * Symphony-style deferred batching with SLO-aware batch sizing
-  - "ours"
+  - "ours_normalized"
       * our Lyapunov-style algorithm_ours:
             - uses virtual SLO queue Z[m]
             - trades off queue backlog, SLO penalty, and accuracy loss
@@ -454,16 +454,6 @@ def choose_exit_id_from_profile(
     return fallback_exit, infer_ms, total_ms
 
 
-def build_accuracy_penalty(model_names, exit_points):
-    """
-    Build accuracy penalty dict for all models: acc_penalty[model_name][exit_id]
-    """
-    result = {}
-    for m in model_names:
-        base_model = m.split("_")[0]  # "ResNet50_0" -> "ResNet50"
-        base = ACCURACY_PENALTIES.get(base_model)
-        result[m] = {e: base.get(e, 0.0) for e in exit_points}
-    return result
 
 
 def compute_avg_slo_penalty(
@@ -730,6 +720,7 @@ def algorithm_early_exit_lowest_interference(
         for task in queues[m].queue:
             wait_times[m].append((now - task.arrival_time) * 1000.0)
     scores = {}
+    max_wait_ms_s = {}
     for m in model_names:
         qsize = queues[m].qsize()
         if qsize > longest_qsize:
@@ -763,6 +754,7 @@ def algorithm_early_exit_lowest_interference(
                 pred_wait_time[m_] = [w + pred_infer_ms for w in wait_times[m_]]
             score += sum(activate_function(pred_wait_time[m_], latency_threshold_ms))
         scores[m] = score # * pred_infer_ms
+        max_wait_ms_s[m] = max_wait_ms
      # choose lowest score
     best_score = float("inf")
     best_model = None
@@ -773,8 +765,18 @@ def algorithm_early_exit_lowest_interference(
             best_model = m
     model_name = best_model
     q = queues[model_name]
+    max_wait_ms = max_wait_ms_s[model_name]
     profile_results = profile_results_by_model[model_name]
     max_batch = max_batch_size_by_model[model_name]
+    # Choose exit based on profile SLO rule and best model
+    exit_id, pred_infer_ms, pred_total_ms = choose_exit_id_from_profile(
+                batch_size=max_batch,
+                max_wait_ms=max_wait_ms,
+                exit_points=exit_points,
+                profile_results=profile_results,
+                latency_threshold_ms=latency_threshold_ms,
+                quantile_key=quantile_key,
+            )
     # Find the model with the lowest predicted wait time
     # Pop at least one task
     batch_tasks = []
@@ -803,199 +805,6 @@ def algorithm_early_exit_lowest_interference(
 
 
 
-def algorithm_early_exit_lowest_interference_old(
-    models: dict,
-    queues: dict,
-    max_batch_size_by_model: dict,
-    exit_points,
-    latency_threshold_ms: float,
-    quantile_key: str,
-    profile_results_by_model: dict,
-    warmup_tasks: int,
-):
-    global DEBUG
-    """
-    Profile-based early-exit scheduler:
-
-      - Pick model with longest queue.
-      - Build a batch up to max_batch_size for that model.
-      - Drop tasks whose waiting time already exceeds SLO.
-      - Using profile, pick the deepest exit whose predicted TOTAL latency
-        (max_wait + infer_with_profile) fits under SLO.
-      - Returns (model_name, exit_id, batch_tasks, batch_size, max_wait_ms,
-                pred_infer_ms, pred_total_ms).
-
-    If no tasks are available, returns None.
-    """
-    model_names = list(models.keys())
-    now = time.perf_counter()
-    # Pick the model with the longest queue
-    # longest-queue-first (LQF)
-    best_model = None
-    best_qsize = 0
-    longest_queue_model = None
-    longest_qsize = 0
-    earliest_time = None
-    earliest_model = None
-    latest_ddl_time = None
-    latest_ddl_model = None
-    wait_times = {}
-    Q_lengths = {}
-    max_Bs = {}
-    # calculate all wait times
-    debug_log(f"-" * 60)
-    for m in model_names:
-        wait_times[m] = []
-        qsize = queues[m].qsize()
-        Q_lengths[m] = qsize
-        max_batch = max_batch_size_by_model[m]
-        max_B = min(Q_lengths[m], max_batch)
-        max_Bs[m] = max_B
-        e = exit_points[-1] # final exit
-            
-        if qsize > longest_qsize:
-            longest_qsize = qsize
-            longest_queue_model = m # LQF
-        # get first task wait time, FCFS style
-        task_list = list(queues[m].queue)
-        
-        if task_list:
-            for task in task_list:
-                wait_times[m].append((now - task.arrival_time) * 1000.0)
-            # get the earliest wait time for this model
-            first_wait_time = wait_times[m][0]
-            if earliest_time is None or first_wait_time > earliest_time:
-                earliest_time = first_wait_time
-                earliest_model = m 
-                
-                
-            infer_ms = get_profile_latency_ms(
-                    profile_results_by_model[m],
-                    exit_id=e,
-                    batch_size=max_B,
-                    quantile_key=quantile_key,
-                )
-            if latest_ddl_time is None or first_wait_time + infer_ms > latest_ddl_time:
-                latest_ddl_time = first_wait_time + infer_ms
-                latest_ddl_model = m
-        if DEBUG:
-            debug_log(f"[Queue] Model: {m}, length:{Q_lengths[m]} waits_ms: {wait_times[m]}")
-    debug_log(f"-" * 60)
-    ###################### rate all actions to the future system overstock
-    inference_on_wait_time = {}
-    scores = {}
-    for m in model_names:
-        inference_on_wait_time[m] = {}
-        scores[m] = {}
-        if Q_lengths[m] <= 0: continue
-
-        max_batch = max_batch_size_by_model[m]
-        max_B = min(Q_lengths[m], max_batch)
-        if max_B <= 0: continue
-        for e in exit_points:
-            inference_on_wait_time[m][e] = {}
-            scores[m][e] = {}
-            for B in range(1, max_B+1):
-                temp_sum_wait_ms = 0.0
-                temp_wait_list = []
-                
-                infer_ms = get_profile_latency_ms(
-                    profile_results_by_model[m],
-                    exit_id=e,
-                    batch_size=B,
-                    quantile_key=quantile_key,
-                )
-                if infer_ms is None or infer_ms <= 1e-6: continue
-                
-                for m_ in model_names:
-                    if m_ == m:
-                        temp_wait_list.extend([x + infer_ms for x in wait_times[m_][:B]])
-                        temp_sum_wait_ms += sum(wait_times[m_][:B]) + len(wait_times[m_][:B]) * infer_ms
-                    else:
-                        temp_wait_list.extend([x + infer_ms for x in wait_times[m_]])
-                        temp_sum_wait_ms += sum(wait_times[m_]) + len(wait_times[m_]) * infer_ms
-
-                inference_on_wait_time[m][e][B] = activate_function(temp_wait_list, latency_threshold_ms)
-                decrease_part = - sum(wait_times[m][:B])
-                scores[m][e][B] = sum(inference_on_wait_time[m][e][B]) + decrease_part
-                debug_log(f"[Score] Model={m}, Exit={e}, Batch={B}, infer time:{infer_ms:.4f}, First Score={scores[m][e][B]-decrease_part:.4f}, decrease_part:{decrease_part:.4f}, final score:{scores[m][e][B]:.4f}  ")
-                debug_log(f"wait_list={[f'{x:.2f}' for x in temp_wait_list]}, sum_wait_ms={temp_sum_wait_ms:.2f}, activated_wait={inference_on_wait_time[m][e][B]}")
-    
-    final_e = exit_points[-1]
-    best_score = float("inf")
-    lowest_interference_model = None
-    zero_inference_models = []
-    for m in model_names:
-        if Q_lengths[m] <= 0: continue
-        score_ = scores[m][final_e][max_Bs[m]]
-        if score_ < best_score:
-            best_score = score_
-            lowest_interference_model = m
-        if score_ <= 0:
-            zero_inference_models.append(m)
-            
-    if DEBUG:
-        debug_log(f"Longest queue model {longest_queue_model}, Earliest model {earliest_model}, Latest ddl model {latest_ddl_model}")
-        debug_log(f"Lowest interference model {lowest_interference_model}, Score: {best_score:.4f}")
-    
-    
-    
-    # search for best score    
-    if len(zero_inference_models) > 1: # more than 1 queue has zero inference_on_wait_time, pick the one with longest queue
-        best_qsize = 0
-        best_model = longest_queue_model
-        debug_log(f"More than 1 model with zero interference, picking longest queue model {best_model}")
-    else: # have inference time, pick the one with lowest inference_on_wait_time score
-        debug_log(f"Picking lowest interference model {lowest_interference_model} with score {best_score:.4f}")
-        best_model = lowest_interference_model
-
-    # best_model = longest_queue_model
-    # best_model = earliest_model
-    # best_model = latest_ddl_model # DDL: deadline-last (pick the batch with longest wait time + infer time, most urgent to serve)
-
-    if best_model is None:
-        return None
-
-    model_name = best_model
-    q = queues[model_name]
-    profile_results = profile_results_by_model[model_name]
-    max_batch = max_batch_size_by_model[model_name]
-
-    # Pop at least one task
-    batch_tasks = []
-    try:
-        t0 = q.get_nowait()
-        batch_tasks.append(t0)
-    except _queue.Empty:
-        return None
-
-    # Fill batch up to max_batch_size
-    while len(batch_tasks) < max_batch:
-        try:
-            t = q.get_nowait()
-            batch_tasks.append(t)
-        except _queue.Empty:
-            break
-
-    now = time.perf_counter()
-
-    batch_size = len(batch_tasks)
-
-    # Max waiting time among kept tasks
-    wait_times_sec = [now - t.arrival_time for t in batch_tasks]
-    max_wait_ms = max(wait_times_sec) * 1000.0
-
-    # Choose exit based on profile SLO rule
-    exit_id, pred_infer_ms, pred_total_ms = choose_exit_id_from_profile(
-        batch_size=batch_size,
-        max_wait_ms=max_wait_ms,
-        exit_points=exit_points,
-        profile_results=profile_results,
-        latency_threshold_ms=latency_threshold_ms,
-        quantile_key=quantile_key,
-    )
-    debug_log(f"Chosen model {model_name}, exit {exit_id}, batch size {batch_size}, max_wait_ms {max_wait_ms:.2f}, pred_infer_ms {pred_infer_ms:.2f}, pred_total_ms {pred_total_ms:.2f}")
-    return model_name, exit_id, batch_tasks, batch_size, max_wait_ms, pred_infer_ms, pred_total_ms
 
 
 def algorithm_all_early(
@@ -1389,184 +1198,6 @@ def algorithm_symphony(
     return model_name, exit_id, batch_tasks, batch_size, max_wait_ms, pred_infer_ms, pred_total_ms
 
 
-def algorithm_ours(
-    models: dict,
-    queues: dict,
-    max_batch_size_by_model: dict,
-    exit_points,
-    latency_threshold_ms: float,
-    quantile_key: str,
-    profile_results_by_model: dict,
-    warmup_tasks: int,
-):
-    """
-    Our Lyapunov-style scheduler:
-
-      - Maintains a virtual SLO queue Z[m] (global VIRTUAL_SLO_QUEUE).
-      - At each decision epoch, searches over actions (m, B, e) where:
-            m: model name
-            B: batch size (1..max_batch_size_by_model[m], capped by queue size)
-            e: exit point in exit_points
-
-      - For each candidate action, compute:
-            Q_m       = current backlog size for model m
-            avg_slo   = average SLO penalty over the first B tasks
-                        using wait-based penalty:
-                            y_i = -log((SLO - wait_i)/SLO)
-            acc_pen(e)= accuracy loss penalty per request for exit e
-
-        Score(m, B, e) = Q_m * B
-                         - W_SLO * Z[m] * avg_slo
-                         - W_ACC * B * acc_pen(e)
-
-      - Picks the (m, B, e) with maximum score.
-      - If no candidate is found (e.g., queues empty), falls back
-        to algorithm_all_early.
-      - When a best action is found, actually pops B tasks from the
-        chosen model queue, drops tasks whose wait already exceeds SLO,
-        and returns the resulting batch and exit.
-
-    Virtual queue Z[m] is updated in scheduler after the batch
-    actually runs, based on the *actual* SLO penalties observed.
-    """
-    global VIRTUAL_SLO_QUEUE
-
-    # Initialize virtual queues lazily
-    for m in models.keys():
-        VIRTUAL_SLO_QUEUE.setdefault(m, 0.0)
-
-    model_names = list(models.keys())
-
-    # Identify models that currently have pending work
-    non_empty_models = [m for m in model_names if not queues[m].empty()]
-    if not non_empty_models:
-        return None
-
-    acc_penalty = build_accuracy_penalty(model_names, exit_points)
-    now = time.perf_counter()
-
-    # before calling this function
-
-    best_score = -float("inf")
-    best_model = None
-    best_B = None
-    best_exit = None
-    best_pred_infer_ms = None
-
-    scores = {}
-
-    # -------------------------
-    # Search over (m, B, e)
-    # -------------------------
-    for m in non_empty_models:
-        q = queues[m]
-        Qm = q.qsize()
-        if Qm <= 0: continue
-
-        max_batch = max_batch_size_by_model[m]
-        max_B = min(Qm, max_batch)
-        if max_B <= 0: continue
-        
-        scores[m] = []
-        # Snapshot of queue contents for *peeking* (do not modify queue yet)
-        pending_tasks = list(q.queue)
-
-        ##### note that we use the max_B directly, without optimization #####
-        
-        # Waits for first B tasks (in ms)
-        waits_ms = [ (now - pending_tasks[i].arrival_time) * 1000.0 for i in range(max_B) ]
-
-        for e in exit_points:
-            infer_ms = get_profile_latency_ms(
-                profile_results_by_model[m],
-                exit_id=e,
-                batch_size=max_B,
-                quantile_key=quantile_key,
-            )
-            if infer_ms is None: continue
-
-            # SLO penalty now depends on BOTH waits and infer_ms(exit, B)
-            avg_slo_pen = compute_avg_slo_penalty(
-                wait_ms_list=waits_ms,
-                infer_ms=infer_ms,
-                slo_ms=latency_threshold_ms,
-            )
-
-            Zm = VIRTUAL_SLO_QUEUE[m]
-            acc_pen = acc_penalty[m][e]
-
-            score = (
-                Qm * max_B
-                - W_SLO * Zm * avg_slo_pen
-                - W_ACC * max_B * acc_pen
-            )
-
-            if score > best_score:
-                best_score = score
-                best_model = m
-                best_B = max_B
-                best_exit = e
-                best_pred_infer_ms = infer_ms
-
-            scores[m].append(score)
-
-    # If no candidate found, fall back to all_early baseline
-    if best_model is None:
-        return algorithm_all_early(
-            models=models,
-            queues=queues,
-            max_batch_size_by_model=max_batch_size_by_model,
-            exit_points=exit_points,
-            latency_threshold_ms=latency_threshold_ms,
-            quantile_key=quantile_key,
-            profile_results_by_model=profile_results_by_model,
-            warmup_tasks=warmup_tasks,
-        )
-
-    # -------------------------
-    # Build actual batch from chosen (best_model, best_B, best_exit)
-    # -------------------------
-    model_name = best_model
-    q = queues[model_name]
-    max_batch = best_B
-    profile_results = profile_results_by_model[model_name]
-
-    batch_tasks = []
-    try:
-        t0 = q.get_nowait()
-        batch_tasks.append(t0)
-    except _queue.Empty:
-        return None
-
-    while len(batch_tasks) < max_batch:
-        try:
-            t = q.get_nowait()
-            batch_tasks.append(t)
-        except _queue.Empty:
-            break
-
-    now2 = time.perf_counter()
-
-    batch_size = len(batch_tasks)
-
-    wait_times_sec = [now2 - t.arrival_time for t in batch_tasks]
-    max_wait_ms = max(wait_times_sec) * 1000.0
-
-    exit_id = best_exit
-    # Use profile for chosen exit / batch
-    pred_infer_ms = get_profile_latency_ms(
-        profile_results,
-        exit_id=exit_id,
-        batch_size=batch_size,
-        quantile_key=quantile_key,
-    )
-    if pred_infer_ms is None:
-        pred_infer_ms = best_pred_infer_ms
-
-    pred_total_ms = max_wait_ms + (pred_infer_ms if pred_infer_ms is not None else 0.0)
-
-    return model_name, exit_id, batch_tasks, batch_size, max_wait_ms, pred_infer_ms, pred_total_ms
-
 
 def algorithm_ours_normalized(
     models: dict,
@@ -1625,7 +1256,6 @@ def algorithm_ours_normalized(
     if max_model_size >10:
         non_empty_models = [m for m in non_empty_models if model_sizes[m] == max_model_size]
 
-    # acc_penalty = build_accuracy_penalty(model_names, exit_points)
     now = time.perf_counter()
 
     # before calling this function
@@ -1841,12 +1471,11 @@ def scheduler(
                  * "all_final_round_robin"
                  * "all_early"
                  * "symphony"
-                 * "ours"
                  * "ours_normalized"
             - get (model_name, exit_id, batch_tasks, batch_size, ...)
             - run inference on GPU
             - record timing and diagnostics
-            - update virtual SLO queue if scheduler_type == "ours" or "ours_normalized"
+            - update virtual SLO queue if scheduler_type == "ours_normalized"
     """
     models_eval = {k: v.eval() for k, v in models.items()}
 
@@ -1945,17 +1574,6 @@ def scheduler(
                 profile_results_by_model=profile_results_by_model,
                 warmup_tasks=warmup_tasks,
                 dropped_wait_times_by_model=dropped_wait_times_by_model,
-            )
-        elif scheduler_type == "ours":
-            result = algorithm_ours(
-                models=models,
-                queues=queues,
-                max_batch_size_by_model=max_batch_size_by_model,
-                exit_points=exit_points,
-                latency_threshold_ms=latency_threshold_ms,
-                quantile_key=quantile_key,
-                profile_results_by_model=profile_results_by_model,
-                warmup_tasks=warmup_tasks,
             )
         elif scheduler_type == "ours_normalized":
             result = algorithm_ours_normalized(
@@ -2068,7 +1686,7 @@ def scheduler(
                 }
             )
 
-            if scheduler_type in ["ours", "ours_normalized"] and non_warmup_count > 0 and wait_ms_list_for_slo:
+            if scheduler_type in [ "ours_normalized"] and non_warmup_count > 0 and wait_ms_list_for_slo:
                 # Use actual per-batch inference latency (ms) in the penalty
                 avg_pen_actual = compute_avg_slo_penalty(
                     wait_ms_list=wait_ms_list_for_slo,
@@ -2076,41 +1694,10 @@ def scheduler(
                     slo_ms=latency_threshold_ms,
                 )
 
-                # Time-normalized virtual queue update (time in milliseconds)
-                # current_time_ms = time.perf_counter() * 1000.0
-                # if model_name not in LAST_VIRTUAL_QUEUE_UPDATE_TIME:
-                #     # First update: use a default time interval (e.g., 100 ms)
-                #     time_delta_ms = 100.0
-                # else:
-                #     time_delta_ms = current_time_ms - LAST_VIRTUAL_QUEUE_UPDATE_TIME[model_name]
-
-                # LAST_VIRTUAL_QUEUE_UPDATE_TIME[model_name] = current_time_ms
-
                 Z_old = VIRTUAL_SLO_QUEUE.get(model_name, 0.0)
 
                 # Calculate decay for the entire time period since last update
-                if scheduler_type == "ours":
-                    # Time-normalized update with decay: Z' = (Z - decay) + delta*penalty
-                    Z_new = max(
-                        min(
-                            Z_old + (avg_pen_actual - SLO_PENALTY_TARGET),
-                            Z_MAX
-                        ),
-                        0.0,
-                    )
-                else: # ours_normalized
-                    # Time-normalized update with decay and batch size
-                    # Z_new = max(
-                    #     min(
-                    #         Z_after_decay + actual_infer_ms/1000 * non_warmup_count * (avg_pen_actual - SLO_PENALTY_TARGET_N),
-                    #         Z_MAX
-                    #     ),
-                    #     0.0,
-                    # )
-                    
-                    # Z_new = max(min(Z_after_decay + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
-                    
-                    Z_new = max(min(Z_old + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
+                Z_new = max(min(Z_old + slo_violations - SLO_PENALTY_TARGET_N*non_warmup_count,Z_MAX),0)
                 VIRTUAL_SLO_QUEUE[model_name] = Z_new
 
                 if DEBUG:
